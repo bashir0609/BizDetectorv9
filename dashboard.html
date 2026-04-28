@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Business Type Detector</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body class="dashboard-body">
+    <div class="app-shell">
+
+      <!-- Sidebar -->
+      <aside class="sidebar">
+
+        <!-- Logo / title -->
+        <div class="sidebar-header">
+          <span class="sidebar-logo">BTD</span>
+          <div>
+            <div class="sidebar-title">Biz Detector</div>
+            <div class="sidebar-tagline">Business type analyzer</div>
+          </div>
+        </div>
+
+        <!-- URL input + primary action -->
+        <div class="sidebar-block">
+          <label class="field">
+            <span class="field-label">Website URL</span>
+            <div class="input-with-action">
+              <input id="targetUrl" type="text" placeholder="example.com" autocomplete="off" spellcheck="false">
+            </div>
+          </label>
+
+          <button id="analyzeUrl" class="btn-primary">
+            <span class="btn-icon">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </span>
+            <span class="btn-label">Analyze site</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+
+          <div class="divider-row">
+            <span class="divider-line"></span>
+            <span class="divider-text">or</span>
+            <span class="divider-line"></span>
+          </div>
+
+          <button id="analyzeCurrent" class="btn-secondary" title="Analyze the most recently used website tab">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="1" y="2" width="14" height="11" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M5 14h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M8 11v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Use recent tab
+          </button>
+
+          <button id="analyzeEmployees" class="btn-secondary" disabled title="Run a deeper scan focused on team and people">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="5" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M1 14c0-3 2-5 5-5h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="11" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
+            Analyze employees
+          </button>
+        </div>
+
+        <!-- Status strip (shows during / after analysis) -->
+        <div id="statusStrip" class="status-strip status-strip--idle">
+          <span id="statusIcon" class="status-icon">idle</span>
+          <span id="status" aria-live="polite">Ready</span>
+          <span id="stageBadge" class="stage-badge stage-badge--idle">Idle</span>
+        </div>
+
+        <!-- Progress bar -->
+        <div class="prog-track">
+          <div id="progressBar" class="prog-bar"></div>
+        </div>
+
+        <!-- Result metrics (visible after analysis) -->
+        <div class="metrics-grid">
+          <div class="metric">
+            <div class="metric-label">Business type</div>
+            <div id="businessType" class="metric-val">-</div>
+            <span id="confidence" class="metric-pill hidden"></span>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Industry</div>
+            <div id="industry" class="metric-val metric-val--sm">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">People</div>
+            <div id="peopleCount" class="metric-val">0</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Pages</div>
+            <div id="pageCount" class="metric-val">0</div>
+          </div>
+        </div>
+
+	<!-- Service keyword triggers -->
+	<div class="sidebar-block" style="padding-top:0;">
+	  <div class="kw-section">
+	    <div class="kw-section-label">Service keyword triggers</div>
+	    <div class="kw-input-row">
+	      <input id="kwInput" type="text" placeholder="e.g. consulting, SaaS..." autocomplete="off">
+	      <button id="kwAdd" class="kw-add-btn">Add</button>
+	    </div>
+	    <div class="kw-tags" id="kwTags"></div>
+	    <p class="kw-hint">If analysis services match any keyword, employee analysis runs automatically.</p>
+	    <div class="kw-status kw-status--idle" id="kwStatus">No keywords set</div>
+	  </div>
+	</div>
+
+        <!-- Settings (collapsed by default) -->
+        <details class="settings-drawer" id="settingsDrawer">
+          <summary class="settings-toggle">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Settings
+            <svg class="chevron" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </summary>
+          <div class="settings-body">
+            <label class="field">
+              <span class="field-label">Provider</span>
+              <select id="provider">
+                <option value="groq">Groq (Cloud)</option>
+                <option value="gemini">Gemini (Google AI Studio)</option>
+                <option value="ollama">Ollama (Cloud API)</option>
+                <option value="jan">Jan AI (Local)</option>
+              </select>
+            </label>
+            <div id="groqFields">
+              <label class="field">
+                <span class="field-label">Groq API keys</span>
+                <textarea id="groqApiKey" rows="4" placeholder="One Groq API key per line" autocomplete="off"></textarea>
+              </label>
+            </div>
+            <div id="geminiFields" class="hidden">
+              <label class="field">
+                <span class="field-label">Gemini API keys</span>
+                <textarea id="geminiApiKey" rows="4" placeholder="One Gemini API key per line" autocomplete="off"></textarea>
+              </label>
+            </div>
+            <div id="ollamaFields" class="hidden">
+              <label class="field">
+                <span class="field-label">Ollama API keys</span>
+                <textarea id="ollamaApiKey" rows="4" placeholder="One Ollama API key per line" autocomplete="off"></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">Ollama API URL</span>
+                <input id="ollamaBaseUrl" type="url" placeholder="https://ollama.com">
+              </label>
+            </div>
+
+            <div id="janFields" class="hidden">
+              <label class="field">
+                <span class="field-label">Jan AI Base URL</span>
+                <input id="janBaseUrl" type="url" placeholder="http://127.0.0.1:1337/v1">
+              </label>
+              <label class="field">
+                <span class="field-label">Model ID</span>
+                <input id="janModel" list="janModelList" placeholder="Search or select a model..." autocomplete="off">
+                <datalist id="janModelList"></datalist>
+              </label>
+            </div>
+            <label class="field field--checkbox">
+              <input id="debugLogsEnabled" type="checkbox" checked>
+              <span class="field-label">Enable debug logs</span>
+            </label>
+            <label class="field field--checkbox">
+              <input id="rateLimitSafeMode" type="checkbox">
+              <span class="field-label">Rate-limit safe mode</span>
+            </label>
+            <button id="saveSettings" class="btn-secondary btn-secondary--sm">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 8l4 4 8-8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Save settings
+            </button>
+          </div>
+        </details>
+
+        <!-- Export tools at the bottom -->
+        <div class="sidebar-footer">
+          <!-- hidden spans to satisfy dashboard.js element refs -->
+          <span id="scopeBadge"  class="hidden">Root domain + key pages</span>
+          <span id="domainBadge" class="hidden">No site selected</span>
+          <span id="recentSiteNote" class="hidden"></span>
+
+          <button id="copyJson" class="tool-btn" title="Copy full result as JSON">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M3 11H2a1 1 0 01-1-1V2a1 1 0 011-1h8a1 1 0 011 1v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Copy JSON
+          </button>
+          <button id="exportCsv" class="tool-btn" title="Download result as CSV">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 1v9M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 11v2a1 1 0 001 1h10a1 1 0 001-1v-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Export CSV
+          </button>
+        </div>
+
+      </aside>
+
+      <!-- Main content -->
+      <div class="content-area">
+
+        <nav class="nav-tabs" role="tablist">
+          <button class="nav-tab active" data-tab="summary"  role="tab" aria-selected="true">Summary</button>
+          <button class="nav-tab"        data-tab="signals"  role="tab" aria-selected="false">Signals</button>
+          <button class="nav-tab"        data-tab="services" role="tab" aria-selected="false">Services <span class="tab-badge hidden" id="badge-services"></span></button>
+          <button class="nav-tab"        data-tab="people"   role="tab" aria-selected="false">People <span class="tab-badge hidden" id="badge-people"></span></button>
+          <button class="nav-tab"        data-tab="evidence" role="tab" aria-selected="false">Evidence <span class="tab-badge hidden" id="badge-evidence"></span></button>
+          <button class="nav-tab"        data-tab="raw"      role="tab" aria-selected="false">Raw JSON</button>
+        </nav>
+
+        <div class="tab-body">
+
+          <!-- Summary -->
+          <div class="tab-pane active" id="tab-summary" role="tabpanel">
+
+            <!-- Classification strip -->
+            <div id="classificationStrip" class="classification-strip hidden">
+              <!-- Top row: Business Type + Industry + Confidence -->
+              <div class="cs-top-row">
+                <div class="cs-item">
+                  <span class="cs-label">Business Type</span>
+                  <span id="cs-businessType" class="cs-value"></span>
+                </div>
+                <div class="cs-divider"></div>
+                <div class="cs-item cs-item--grow">
+                  <span class="cs-label">Industry</span>
+                  <span id="cs-industry" class="cs-value cs-value--muted"></span>
+                </div>
+                <div class="cs-confidence-wrap hidden" id="cs-confidenceWrap">
+                  <span id="cs-confidence" class="cs-confidence-pill"></span>
+                </div>
+              </div>
+              <!-- Services row: own full-width block row, no siblings competing -->
+              <div class="cs-services-row">
+                <span class="cs-label">Services</span>
+                <div id="cs-services" class="cs-value cs-value--services"></div>
+              </div>
+            </div>
+
+            <div id="emptyState" class="empty-state">
+              <div class="empty-graphic">
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none"><rect x="4" y="4" width="32" height="32" rx="8" stroke="currentColor" stroke-width="1.5" opacity="0.2"/><path d="M13 20h14M13 14h8M13 26h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/><circle cx="28" cy="26" r="5" stroke="currentColor" stroke-width="1.5" opacity="0.6"/><path d="M31.5 29.5l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/></svg>
+              </div>
+              <p class="empty-title">No analysis yet</p>
+              <p class="empty-hint">Enter a URL in the sidebar and click <strong>Analyze site</strong> to get started.</p>
+            </div>
+            <div id="result" class="hidden">
+              <div class="rp">
+                <div class="rp-head">Overview</div>
+                <div class="rp-body"><p id="summary"></p></div>
+              </div>
+              <div class="rp">
+                <div class="rp-head">Team details</div>
+                <div class="rp-body"><p id="teamSummary"></p></div>
+              </div>
+              <div id="peopleGridPanel" class="rp hidden">
+                <div class="rp-head">People &amp; Team</div>
+                <div class="rp-body rp-body--flush" id="peopleGrid"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Signals -->
+          <div class="tab-pane" id="tab-signals" role="tabpanel">
+            <div class="rp">
+              <div class="rp-head">Website signals</div>
+              <div class="rp-body"><p id="websiteSignals" class="placeholder-text">Run an analysis to see website signals.</p></div>
+            </div>
+          </div>
+
+          <!-- Services -->
+          <div class="tab-pane" id="tab-services" role="tabpanel">
+            <div class="rp">
+              <div class="rp-head">Services offered</div>
+              <div class="rp-body"><ul id="services"><li class="placeholder-text" style="list-style:none">Run an analysis to see services.</li></ul></div>
+            </div>
+          </div>
+
+          <!-- People -->
+          <div class="tab-pane" id="tab-people" role="tabpanel">
+            <div class="rp">
+              <div class="rp-head">People &amp; team</div>
+              <div class="rp-body"><ul id="people"><li class="placeholder-text" style="list-style:none">Run an analysis or use <strong>Analyze employees</strong> for deeper results.</li></ul></div>
+            </div>
+          </div>
+
+          <!-- Evidence -->
+          <div class="tab-pane" id="tab-evidence" role="tabpanel">
+            <div class="rp">
+              <div class="rp-head">Classification evidence</div>
+              <div class="rp-body"><ul id="evidence"><li class="placeholder-text" style="list-style:none">Run an analysis to see evidence.</li></ul></div>
+            </div>
+          </div>
+
+          <!-- Raw JSON -->
+          <div class="tab-pane" id="tab-raw" role="tabpanel">
+            <div class="rp">
+              <div class="rp-head">Raw JSON output</div>
+              <div class="rp-body"><pre id="raw" class="placeholder-text">No analysis yet.</pre></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /.app-shell -->
+
+    <script src="dashboard-ui.js"></script>
+    <script type="module" src="dashboard.js"></script>
+  </body>
+</html>

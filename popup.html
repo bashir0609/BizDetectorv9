@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Business Type Detector</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel">
+        <h1>Business Type Detector</h1>
+        <p class="subtle">Analyze the current tab and classify the business.</p>
+
+        <div id="compactBar" class="compact-bar hidden">
+          <button id="reAnalyze" class="secondary small">Re-analyze</button>
+          <button id="toggleSettings" class="secondary small">Settings</button>
+        </div>
+
+        <div id="settingsPanel">
+          <div class="actions">
+            <button id="analyze" class="primary">Analyze Current Tab</button>
+          </div>
+
+          <div class="actions" style="margin-top:8px">
+            <button id="analyzeEmployees" class="secondary" disabled>Analyze Employee Details</button>
+            <button id="openDashboard" class="secondary">Open Dashboard</button>
+          </div>
+
+          <details class="advanced" id="settingsDetails">
+            <summary>&#9881; Provider &amp; API Key</summary>
+
+            <label class="field">
+              <span>Provider</span>
+              <select id="provider">
+                <option value="groq">Groq (Cloud)</option>
+                <option value="gemini">Gemini (Google AI Studio)</option>
+                <option value="ollama">Ollama (Cloud API)</option>
+                <option value="jan">Jan AI (Local)</option>
+              </select>
+            </label>
+
+            <div id="groqFields">
+              <p class="subtle">Using Groq free models automatically.</p>
+              <label class="field">
+                <span>Groq API Keys</span>
+                <textarea id="groqApiKey" rows="4" placeholder="One Groq API key per line"></textarea>
+              </label>
+            </div>
+
+            <div id="geminiFields" class="hidden">
+              <p class="subtle">Using Gemini free models from Google AI Studio.</p>
+              <label class="field">
+                <span>Gemini API Keys</span>
+                <textarea id="geminiApiKey" rows="4" placeholder="One Gemini API key per line"></textarea>
+              </label>
+            </div>
+
+            <div id="ollamaFields" class="hidden">
+              <p class="subtle">Using Ollama's hosted API. Create an API key at ollama.com/settings/keys.</p>
+              <label class="field">
+                <span>Ollama API Key</span>
+                <textarea id="ollamaApiKey" rows="3" placeholder="One Ollama API key per line" autocomplete="off"></textarea>
+              </label>
+              <label class="field">
+                <span>Ollama API URL</span>
+                <input id="ollamaBaseUrl" type="url" placeholder="https://ollama.com">
+              </label>
+            </div>
+
+            <div id="janFields" class="hidden">
+              <p class="subtle">Running models through Jan's local OpenAI-compatible server.</p>
+              <label class="field">
+                <span>Jan AI Base URL</span>
+                <input id="janBaseUrl" type="url" placeholder="http://127.0.0.1:1337/v1">
+              </label>
+              <label class="field">
+                <span>Model ID</span>
+                <input id="janModel" type="text" placeholder="local-model-id" autocomplete="off">
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <p id="status" class="status" aria-live="polite"></p>
+
+        <section id="result" class="result hidden">
+          <div class="result-header">
+            <h2 id="businessType">Unknown</h2>
+            <span id="confidence" class="pill">Confidence: n/a</span>
+          </div>
+          <p id="summary" class="summary"></p>
+
+          <div class="grid">
+            <div>
+              <h3>Industry</h3>
+              <p id="industry"></p>
+            </div>
+            <div>
+              <h3>Website Signals</h3>
+              <p id="websiteSignals"></p>
+            </div>
+          </div>
+
+          <div>
+            <h3>Services</h3>
+            <ul id="services"></ul>
+          </div>
+
+          <div>
+            <h3>People</h3>
+            <ul id="people"></ul>
+          </div>
+
+          <div>
+            <h3>Team Details</h3>
+            <p id="teamSummary"></p>
+          </div>
+
+          <div>
+            <h3>Evidence</h3>
+            <ul id="evidence"></ul>
+          </div>
+
+          <details class="raw-details">
+            <summary>Raw JSON</summary>
+            <pre id="raw"></pre>
+          </details>
+
+          <div class="result-actions">
+            <button id="copyJson" class="secondary">Copy JSON</button>
+            <button id="exportCsv" class="secondary">Export CSV</button>
+          </div>
+        </section>
+
+      </section>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

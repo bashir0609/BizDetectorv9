@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Biz Detector",
+  "version": "2.0.9",
+  "description": "Detects a website's business type and services using an LLM API.",
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://api.groq.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_title": "Business Type Detector",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

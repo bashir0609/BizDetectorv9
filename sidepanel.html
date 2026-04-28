@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Business Type Detector Panel</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* API Key Manager */
+    .key-manager {
+      border: 1px solid var(--c-border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      background: var(--c-surface);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .key-manager-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--c-hint);
+      background: var(--c-surface2);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+      border-bottom: 1px solid transparent;
+      transition: color 120ms;
+    }
+
+    .key-manager-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .key-manager-summary:hover {
+      color: var(--c-text);
+    }
+
+    details[open] .key-manager-summary {
+      color: var(--c-text);
+      border-bottom-color: var(--c-border);
+    }
+
+    .key-manager-summary .km-chevron {
+      margin-left: auto;
+      transition: transform 200ms;
+      font-size: 10px;
+      color: var(--c-hint);
+    }
+
+    details[open] .key-manager-summary .km-chevron {
+      transform: rotate(180deg);
+    }
+
+    .km-badges {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .km-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 99px;
+      letter-spacing: .03em;
+    }
+
+    .km-badge--ready {
+      background: var(--c-ok-bg);
+      color: var(--c-ok);
+    }
+
+    .km-badge--limited {
+      background: var(--c-warn-bg);
+      color: var(--c-warn);
+    }
+
+    .km-badge--empty {
+      background: var(--c-surface2);
+      color: var(--c-hint);
+      border: 1px solid var(--c-border);
+    }
+
+    .key-manager-body {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .km-slots {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .km-slot {
+      display: grid;
+      grid-template-columns: 22px 1fr auto;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .km-slot-num {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--c-hint);
+      text-align: center;
+      line-height: 1;
+    }
+
+    .km-slot-num--active {
+      color: var(--c-ok);
+    }
+
+    .km-slot-num--limited {
+      color: var(--c-warn);
+    }
+
+    .km-input {
+      font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+      font-size: 11px !important;
+      padding: 7px 10px !important;
+      letter-spacing: .02em;
+      width: 100%;
+    }
+
+    .km-input.has-value {
+      border-color: rgba(2, 122, 72, 0.35) !important;
+      background: var(--c-ok-bg) !important;
+    }
+
+    .km-del {
+      background: none;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      color: var(--c-hint);
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 4px 5px;
+      width: auto !important;
+      transition: color 120ms, background 120ms, border-color 120ms;
+    }
+
+    .km-del:hover {
+      color: var(--c-err);
+      background: var(--c-err-bg);
+      border-color: var(--c-err-bg);
+    }
+
+    .km-footer {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding-top: 2px;
+    }
+
+    .km-add {
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--font);
+      color: var(--c-accent);
+      background: rgba(26, 86, 219, .07);
+      border: 1px dashed rgba(26, 86, 219, .3);
+      border-radius: var(--radius-sm);
+      padding: 5px 10px;
+      cursor: pointer;
+      width: auto !important;
+      transition: background 120ms;
+    }
+
+    .km-add:hover {
+      background: rgba(26, 86, 219, .13);
+    }
+
+    .km-add:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .km-save {
+      margin-left: auto;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: var(--font);
+      color: var(--c-accent-fg);
+      background: var(--c-accent);
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 5px 14px;
+      cursor: pointer;
+      width: auto !important;
+      transition: background 140ms;
+    }
+
+    .km-save:hover {
+      background: var(--c-accent-hover);
+    }
+
+    .km-saved {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--c-ok);
+      opacity: 0;
+      transition: opacity 300ms;
+      white-space: nowrap;
+    }
+
+    .km-saved.visible {
+      opacity: 1;
+    }
+  </style>
+</head>
+
+<body class="panel-body">
+  <main class="app">
+    <section class="panel">
+      <h1>Business Type Detector</h1>
+      <p class="subtle">Latest result from the workspace.</p>
+
+      <!-- API Key Manager -->
+      <details class="key-manager" id="keyManager">
+        <summary class="key-manager-summary">
+          <span>Groq API Keys</span>
+          <div class="km-badges" id="kmBadges"></div>
+          <span class="km-chevron">v</span>
+        </summary>
+        <div class="key-manager-body">
+          <div class="km-slots" id="kmSlots"></div>
+          <div class="km-footer">
+            <button class="km-add" id="kmAdd">+ Add key</button>
+            <span class="km-saved" id="kmSaved">Saved</span>
+            <button class="km-save" id="kmSave">Save</button>
+          </div>
+        </div>
+      </details>
+      <!-- API key manager script -->
+
+      <p id="status" class="status" aria-live="polite"></p>
+
+      <section id="emptyState" class="history-empty-block">
+        <p class="history-empty">Run an analysis from the popup to load results here.</p>
+      </section>
+
+      <section id="result" class="result hidden">
+        <div class="result-header">
+          <h2 id="businessType">Unknown</h2>
+          <span id="confidence" class="pill">Confidence: n/a</span>
+        </div>
+        <p id="summary" class="summary"></p>
+
+        <div class="grid">
+          <div>
+            <h3>Industry</h3>
+            <p id="industry"></p>
+          </div>
+          <div>
+            <h3>Website Signals</h3>
+            <p id="websiteSignals"></p>
+          </div>
+        </div>
+
+        <div>
+          <h3>Services</h3>
+          <ul id="services"></ul>
+        </div>
+
+        <div>
+          <h3>People</h3>
+          <ul id="people"></ul>
+        </div>
+
+        <div>
+          <h3>Team Details</h3>
+          <p id="teamSummary"></p>
+        </div>
+
+        <div>
+          <h3>Evidence</h3>
+          <ul id="evidence"></ul>
+        </div>
+
+        <div>
+          <h3>Raw JSON</h3>
+          <pre id="raw"></pre>
+        </div>
+
+        <div class="result-actions">
+          <button id="copyJson" class="secondary">Copy JSON</button>
+          <button id="exportCsv" class="secondary">Export CSV</button>
+        </div>
+      </section>
+
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const MAX_KEYS = 3;
+      const STORAGE_KEY = "providerApiKeys";
+
+      const slotsEl = document.getElementById("kmSlots");
+      const addBtn = document.getElementById("kmAdd");
+      const saveBtn = document.getElementById("kmSave");
+      const savedMsg = document.getElementById("kmSaved");
+      const badgesEl = document.getElementById("kmBadges");
+
+      function normalizeKeys(raw) {
+        if (Array.isArray(raw)) {
+          return raw.map(k => String(k || "").trim()).filter(Boolean);
+        }
+        return String(raw || "")
+          .split(/\r?\n|,/)
+          .map(k => k.trim())
+          .filter(Boolean);
+      }
+
+      // Render badge strip (collapsed view)
+      function renderBadges(keys) {
+        badgesEl.innerHTML = "";
+        const filled = keys.filter(Boolean);
+        if (!filled.length) {
+          const b = document.createElement("span");
+          b.className = "km-badge km-badge--empty";
+          b.textContent = "No keys";
+          badgesEl.appendChild(b);
+          return;
+        }
+        filled.forEach((_, i) => {
+          const b = document.createElement("span");
+          b.className = "km-badge km-badge--ready";
+          b.textContent = `K${i + 1}`;
+          badgesEl.appendChild(b);
+        });
+      }
+
+      // Render key slots
+      function renderSlots(keys) {
+        slotsEl.innerHTML = "";
+        keys.forEach((key, i) => {
+          const slot = document.createElement("div");
+          slot.className = "km-slot";
+
+          const num = document.createElement("span");
+          num.className = "km-slot-num" + (key ? " km-slot-num--active" : "");
+          num.textContent = i + 1;
+
+          const inp = document.createElement("input");
+          inp.type = "password";
+          inp.className = "km-input" + (key ? " has-value" : "");
+          inp.placeholder = "gsk_...";
+          inp.value = key || "";
+          inp.autocomplete = "off";
+          inp.spellcheck = false;
+          inp.addEventListener("input", () => {
+            const v = inp.value.trim();
+            inp.classList.toggle("has-value", v.length > 0);
+            num.className = "km-slot-num" + (v ? " km-slot-num--active" : "");
+          });
+
+          const del = document.createElement("button");
+          del.className = "km-del";
+          del.title = "Remove";
+          del.textContent = "x";
+          del.addEventListener("click", () => {
+            const cur = getValues();
+            cur.splice(i, 1);
+            renderSlots(cur.length ? cur : [""]);
+            syncAddBtn(cur.length || 1);
+          });
+
+          slot.append(num, inp, del);
+          slotsEl.appendChild(slot);
+        });
+      }
+
+      function getValues() {
+        return Array.from(slotsEl.querySelectorAll(".km-input"))
+          .map(el => el.value.trim());
+      }
+
+      function syncAddBtn(count) {
+        addBtn.disabled = count >= MAX_KEYS;
+      }
+
+      // Load
+      async function load() {
+        const [session, sync, local] = await Promise.all([
+          chrome.storage.session.get(STORAGE_KEY).catch(() => ({})),
+          chrome.storage.sync.get(STORAGE_KEY).catch(() => ({})),
+          chrome.storage.local.get(STORAGE_KEY).catch(() => ({})),
+        ]);
+        const merged = {
+          ...(sync[STORAGE_KEY] || {}),
+          ...(local[STORAGE_KEY] || {}),
+          ...(session[STORAGE_KEY] || {}),
+        };
+        const keys = normalizeKeys(merged.groq || []);
+
+        const slots = keys.length ? keys : [""];
+        renderSlots(slots);
+        syncAddBtn(slots.length);
+        renderBadges(slots.filter(Boolean));
+      }
+
+      // Save
+      saveBtn.addEventListener("click", async () => {
+        const keys = getValues().filter(Boolean);
+        
+        // NEW: Fetch existing keys first so we don't delete Gemini/Ollama configs!
+        const stored = await chrome.storage.local.get(STORAGE_KEY).catch(() => ({}));
+        const existingKeys = stored[STORAGE_KEY] || {};
+
+        const payload = { 
+          [STORAGE_KEY]: { 
+            ...existingKeys,
+            groq: keys.join("\n") 
+          } 
+        };
+
+        await Promise.all([
+          chrome.storage.sync.remove(STORAGE_KEY).catch(() => { }),
+          chrome.storage.session.set(payload).catch(() => { }),
+          chrome.storage.local.set(payload).catch(() => { }),
+        ]);
+        renderBadges(keys);
+        savedMsg.classList.add("visible");
+        setTimeout(() => savedMsg.classList.remove("visible"), 2000);
+      });
+
+      // Add slot
+      addBtn.addEventListener("click", () => {
+        const cur = getValues();
+        if (cur.length >= MAX_KEYS) return;
+        renderSlots([...cur, ""]);
+        syncAddBtn(cur.length + 1);
+        slotsEl.querySelectorAll(".km-input")[cur.length]?.focus();
+      });
+
+      load();
+    })();
+  </script>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+
+</html>
