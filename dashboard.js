@@ -1028,6 +1028,17 @@ async function extractPageDataFromTab(tabId, options = {}) {
       await sleep(1500);
     }
     
+    // v10: Discover profile links AFTER expansion but BEFORE extraction
+    // This ensures we capture links that were hidden before scroll/load-more
+    let profileLinks = [];
+    if (options.discoverProfileLinks) {
+      const profileResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => globalThis.BTDPageExtractor?.discoverProfileLinks()
+      });
+      profileLinks = profileResults?.[0]?.result || [];
+    }
+    
     results = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => globalThis.BTDPageExtractor?.extractPageData()
@@ -1043,6 +1054,12 @@ async function extractPageDataFromTab(tabId, options = {}) {
   if (!pageData) {
     throw new Error("Unable to read that page.");
   }
+  
+  // v10: Attach discovered profile links to page data
+  if (profileLinks.length > 0) {
+    pageData.discoveredProfileLinks = profileLinks;
+  }
+  
   return pageData;
 }
 
@@ -1110,6 +1127,7 @@ async function fetchPageInBackground(url, options = {}) {
   const throttleMs = Math.max(0, Number(options.throttleMs) || 0);
   const settleMs = Math.max(0, Number(options.settleMs ?? CRAWL_TAB_SETTLE_MS) || 0);
   const expandTeamPage = options.expandTeamPage ?? false;
+  const discoverProfileLinks = options.discoverProfileLinks ?? false; // v10: Enable profile link discovery
   let tempTab = null;
   try {
     if (throttleMs > 0) {
@@ -1120,7 +1138,7 @@ async function fetchPageInBackground(url, options = {}) {
     if (settleMs > 0) {
       await sleep(settleMs);
     }
-    return await extractPageDataFromTab(tempTab.id, { expandTeamPage });
+    return await extractPageDataFromTab(tempTab.id, { expandTeamPage, discoverProfileLinks });
   } catch {
     return null;
   } finally {
@@ -1243,8 +1261,9 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
   const expandFromDiscovered = options.expandFromDiscovered ?? true;
   const includeHomepage = options.includeHomepage ?? true;
   const expandTeamPage = options.expandTeamPage ?? false;
+  const discoverProfileLinks = options.discoverProfileLinks ?? true; // v10: Enable profile link discovery
   const rootOrigin = new URL(homepage.url).origin;
-  logDebug("Crawl start", { rootOrigin, maxDepth, maxPages, focus, homepage: homepage.url, expandFromDiscovered, includeHomepage, expandTeamPage });
+  logDebug("Crawl start", { rootOrigin, maxDepth, maxPages, focus, homepage: homepage.url, expandFromDiscovered, includeHomepage, expandTeamPage, discoverProfileLinks });
   const pages = includeHomepage ? [homepage] : [];
   const visited = includeHomepage ? new Set([toCanonicalPageKey(homepage.url)]) : new Set();
   const queued = new Set();
@@ -1280,7 +1299,8 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     logDebug("Crawl visiting", { depth: next.depth, url: next.url, visited: pages.length, queued: queue.length });
 
     const crawlDelayMs = getCrawlDelayMs();
-    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs, expandTeamPage });
+    // v10: Pass discoverProfileLinks option to fetchPageInBackground
+    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs, expandTeamPage, discoverProfileLinks });
     if (!page || !isSupportedUrl(page.url)) continue;
 
     let canonicalPageUrl;
@@ -1297,6 +1317,25 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     if (visited.has(pageKey)) continue;
     visited.add(pageKey);
     pages.push(page);
+
+    // v10: Add discovered profile links to the queue
+    if (discoverProfileLinks && page.discoveredProfileLinks?.length > 0) {
+      logDebug("Discovered profile links", { count: page.discoveredProfileLinks.length, source: page.url });
+      for (const profileLink of page.discoveredProfileLinks) {
+        if (pages.length + queue.length >= maxPages * 2) break;
+        let profilePageKey;
+        try {
+          const parsed = new URL(profileLink.href);
+          if (parsed.origin !== rootOrigin) continue;
+          profilePageKey = toCanonicalPageKey(parsed.toString());
+        } catch {
+          continue;
+        }
+        if (visited.has(profilePageKey) || queued.has(profilePageKey)) continue;
+        queued.add(profilePageKey);
+        queue.push({ url: toCanonicalUrl(profileLink.href), depth: next.depth + 1 });
+      }
+    }
 
     if (!expandFromDiscovered) continue;
     if (next.depth >= maxDepth || pages.length >= maxPages) continue;
@@ -1654,6 +1693,7 @@ async function analyzeEmployeeDetailsForUrl(url) {
       includeHomepage: false,
       expandFromDiscovered: true,
       expandTeamPage: true,
+      discoverProfileLinks: true, // v10: Enable profile link discovery during crawl
       onProgress: ({ visited, depth, queued }) => {
         setStage("Crawling", "busy");
         setStatus(`Crawling depth ${depth} (${visited}/${dynamicMaxPages} max pages)...`);
