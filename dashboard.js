@@ -18,7 +18,7 @@ const CRAWL_SAFE_MODE_EXTRA_DELAY_MS = 1300;
 const CRAWL_TAB_SETTLE_MS = 500;
 const NON_HTML_RESOURCE_EXT = /\.(pdf|png|jpe?g|gif|webp|svg|zip|rar|7z|mp4|mp3|wav|avi|mov|m4a|docx?|xlsx?|pptx?)$/i;
 const BUSINESS_PAGE_KEYWORD_REGEX = /\b(service|services|solution|solutions|product|products|offering|offerings|what-we-do|capabilit|industry|industries|sector|sectors|about|about-us|company|our-company|overview|expertise|specialt|practice|portfolio|case-stud|work|clients?|markets?)\b/i;
-const TEAM_PAGE_KEYWORD_REGEX = /\b(team|our-team|people|staff|leadership|leaders|management|founders?|directors?|executives?|agents?|brokers?|realtors?|advisors?|who-we-are|meet-the-team|directory|professionals|about|about-us|company|office|locations?|contact)\b/i;
+const TEAM_PAGE_KEYWORD_REGEX = /\b(team|our-team|people|staff|leadership|leaders|management|founders?|directors?|executives?|agents?|brokers?|realtors?|advisors?|who-we-are|meet-the-team|directory|professionals|about|about-us|company|office|locations?|contact|profile[s]?|member[s]?|agent[s]?|sales-consultant|team-member|employee[s]?)\b/i;
 const DASH_LOG_PREFIX = "[BTD:Dashboard]";
 let debugLogsEnabled = true;
 
@@ -1002,7 +1002,7 @@ async function waitForTabComplete(tabId) {
   });
 }
 
-async function extractPageDataFromTab(tabId) {
+async function extractPageDataFromTab(tabId, options = {}) {
   const tab = await chrome.tabs.get(tabId);
   if (!isSupportedUrl(tab.url)) {
     throw new Error("This page cannot be analyzed. Use a regular website URL.");
@@ -1013,6 +1013,32 @@ async function extractPageDataFromTab(tabId) {
       target: { tabId },
       files: ["shared/page-extractor.js"]
     });
+    
+    // v10: Support expandTeamPage option for deep extraction
+    if (options.expandTeamPage) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async () => {
+          if (globalThis.BTDPageExtractor?.expandTeamPage) {
+            await globalThis.BTDPageExtractor.expandTeamPage();
+          }
+        }
+      });
+      // Extra settle time after expansion
+      await sleep(1500);
+    }
+    
+    // v10: Discover profile links AFTER expansion but BEFORE extraction
+    // This ensures we capture links that were hidden before scroll/load-more
+    let profileLinks = [];
+    if (options.discoverProfileLinks) {
+      const profileResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => globalThis.BTDPageExtractor?.discoverProfileLinks()
+      });
+      profileLinks = profileResults?.[0]?.result || [];
+    }
+    
     results = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => globalThis.BTDPageExtractor?.extractPageData()
@@ -1028,7 +1054,69 @@ async function extractPageDataFromTab(tabId) {
   if (!pageData) {
     throw new Error("Unable to read that page.");
   }
+  
+  // v10: Attach discovered profile links to page data
+  if (profileLinks.length > 0) {
+    pageData.discoveredProfileLinks = profileLinks;
+  }
+  
   return pageData;
+}
+
+// v10: Discover profile links from a tab
+async function discoverProfileLinksFromTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["shared/page-extractor.js"]
+    });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => globalThis.BTDPageExtractor?.discoverProfileLinks()
+    });
+    return results?.[0]?.result || [];
+  } catch {
+    return [];
+  }
+}
+
+// v10: Calculate coverage score
+function calculateCoverageScoreForPeople(people, pageData) {
+  if (!globalThis.BTDPageExtractor?.calculateCoverageScore) {
+    // Fallback inline implementation
+    const hasTeamSection = /[tT]eam|[sS]taff|[pP]eople|[lL]eadership|[aA]gents|[rR]ealtors/.test(pageData.bodyText || "");
+    const hasMultipleProfiles = people.length >= 3;
+    const hasContactInfo = people.some(p => p.email || p.phone);
+    const hasTitles = people.some(p => p.title);
+    const hasLinkedin = people.some(p => p.linkedinUrl);
+    
+    let rawScore = 0;
+    if (hasTeamSection) rawScore += 20;
+    else rawScore += 10;
+    if (hasMultipleProfiles) rawScore += 25;
+    else if (people.length > 0) rawScore += 15;
+    if (hasContactInfo) rawScore += 15;
+    if (hasTitles) rawScore += 15;
+    if (hasLinkedin) rawScore += 10;
+    
+    const completeProfiles = people.filter(p => {
+      const fields = [p.name, p.title, p.email, p.phone].filter(Boolean);
+      return fields.length >= 2;
+    }).length;
+    const completenessRatio = people.length > 0 ? completeProfiles / people.length : 0;
+    rawScore += Math.round(completenessRatio * 15);
+    
+    const uniqueSources = new Set(people.map(p => p.sourceUrl)).size;
+    rawScore += Math.min(10, uniqueSources * 2);
+    
+    return {
+      total: Math.min(100, rawScore),
+      factors: { hasTeamSection, hasMultipleProfiles, hasContactInfo, hasTitles, hasLinkedin, uniqueSources },
+      warnings: [],
+      recommendations: []
+    };
+  }
+  return globalThis.BTDPageExtractor.calculateCoverageScore(people, pageData);
 }
 
 async function extractHomepageData(tabId) {
@@ -1038,6 +1126,8 @@ async function extractHomepageData(tabId) {
 async function fetchPageInBackground(url, options = {}) {
   const throttleMs = Math.max(0, Number(options.throttleMs) || 0);
   const settleMs = Math.max(0, Number(options.settleMs ?? CRAWL_TAB_SETTLE_MS) || 0);
+  const expandTeamPage = options.expandTeamPage ?? false;
+  const discoverProfileLinks = options.discoverProfileLinks ?? false; // v10: Enable profile link discovery
   let tempTab = null;
   try {
     if (throttleMs > 0) {
@@ -1048,7 +1138,7 @@ async function fetchPageInBackground(url, options = {}) {
     if (settleMs > 0) {
       await sleep(settleMs);
     }
-    return await extractPageDataFromTab(tempTab.id);
+    return await extractPageDataFromTab(tempTab.id, { expandTeamPage, discoverProfileLinks });
   } catch {
     return null;
   } finally {
@@ -1068,7 +1158,9 @@ function gatherInternalLinks(pageData, rootOrigin, focus = "employee") {
           const parsed = new URL(href);
           if (parsed.origin !== rootOrigin) return { href, score: -1 };
           const haystack = `${parsed.pathname} ${text}`.toLowerCase();
-          if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack)) {
+          // Allow profile pages and agent pages even without explicit keywords
+          const isProfilePage = /\/(agent|profile|people|staff|team|member|realtor|broker)[s]?\/[^\/]+/i.test(parsed.pathname);
+          if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack) && !isProfilePage) {
             return { href, score: -1 }; // Force drop generic links
           }
         } catch {
@@ -1099,7 +1191,9 @@ function filterTeamCandidateUrlsFromHomepage(links, rootOrigin) {
         if (parsed.origin !== rootOrigin) return null;
         if (!isCrawlableUrl(parsed.toString())) return null;
         const haystack = `${parsed.pathname} ${text}`.toLowerCase();
-        if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack)) return null;
+        // Allow profile pages and agent pages even without explicit keywords
+        const isProfilePage = /\/(agent|profile|people|staff|team|member|realtor|broker)[s]?\/[^\/]+/i.test(parsed.pathname);
+        if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack) && !isProfilePage) return null;
         return {
           href: toCanonicalUrl(parsed.toString()),
           score: scoreLink({ href, text, source }, rootOrigin, "employee")
@@ -1166,8 +1260,10 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
   const focus = options.focus || "employee";
   const expandFromDiscovered = options.expandFromDiscovered ?? true;
   const includeHomepage = options.includeHomepage ?? true;
+  const expandTeamPage = options.expandTeamPage ?? false;
+  const discoverProfileLinks = options.discoverProfileLinks ?? true; // v10: Enable profile link discovery
   const rootOrigin = new URL(homepage.url).origin;
-  logDebug("Crawl start", { rootOrigin, maxDepth, maxPages, focus, homepage: homepage.url, expandFromDiscovered, includeHomepage });
+  logDebug("Crawl start", { rootOrigin, maxDepth, maxPages, focus, homepage: homepage.url, expandFromDiscovered, includeHomepage, expandTeamPage, discoverProfileLinks });
   const pages = includeHomepage ? [homepage] : [];
   const visited = includeHomepage ? new Set([toCanonicalPageKey(homepage.url)]) : new Set();
   const queued = new Set();
@@ -1203,7 +1299,8 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     logDebug("Crawl visiting", { depth: next.depth, url: next.url, visited: pages.length, queued: queue.length });
 
     const crawlDelayMs = getCrawlDelayMs();
-    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs });
+    // v10: Pass discoverProfileLinks option to fetchPageInBackground
+    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs, expandTeamPage, discoverProfileLinks });
     if (!page || !isSupportedUrl(page.url)) continue;
 
     let canonicalPageUrl;
@@ -1220,6 +1317,25 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     if (visited.has(pageKey)) continue;
     visited.add(pageKey);
     pages.push(page);
+
+    // v10: Add discovered profile links to the queue
+    if (discoverProfileLinks && page.discoveredProfileLinks?.length > 0) {
+      logDebug("Discovered profile links", { count: page.discoveredProfileLinks.length, source: page.url });
+      for (const profileLink of page.discoveredProfileLinks) {
+        if (pages.length + queue.length >= maxPages * 2) break;
+        let profilePageKey;
+        try {
+          const parsed = new URL(profileLink.href);
+          if (parsed.origin !== rootOrigin) continue;
+          profilePageKey = toCanonicalPageKey(parsed.toString());
+        } catch {
+          continue;
+        }
+        if (visited.has(profilePageKey) || queued.has(profilePageKey)) continue;
+        queued.add(profilePageKey);
+        queue.push({ url: toCanonicalUrl(profileLink.href), depth: next.depth + 1 });
+      }
+    }
 
     if (!expandFromDiscovered) continue;
     if (next.depth >= maxDepth || pages.length >= maxPages) continue;
@@ -1576,6 +1692,8 @@ async function analyzeEmployeeDetailsForUrl(url) {
       seedUrls,
       includeHomepage: false,
       expandFromDiscovered: true,
+      expandTeamPage: true,
+      discoverProfileLinks: true, // v10: Enable profile link discovery during crawl
       onProgress: ({ visited, depth, queued }) => {
         setStage("Crawling", "busy");
         setStatus(`Crawling depth ${depth} (${visited}/${dynamicMaxPages} max pages)...`);
@@ -1589,9 +1707,19 @@ async function analyzeEmployeeDetailsForUrl(url) {
     setStage("Analyzing", "busy");
     setStatus("Extracting employee details with AI...");
 
+    // v10: Calculate coverage score before AI analysis
+    const allPeopleFromCrawl = validPages.flatMap(p => p.people || []);
+    const coverageScore = calculateCoverageScoreForPeople(
+      allPeopleFromCrawl,
+      { bodyText: validPages.map(p => p.bodyText || "").join(" ") }
+    );
+    
+    logDebug("Coverage Score Before AI", coverageScore);
+
     const pageData = {
       ...homepage,
-      discoveredPages: validPages
+      discoveredPages: validPages,
+      coverageScore // v10: Include coverage metadata
     };
 
     const response = await chrome.runtime.sendMessage({

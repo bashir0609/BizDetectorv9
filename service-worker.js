@@ -223,12 +223,18 @@ function buildEmployeeResearchPayload(pageData = {}, tier = "normal") {
   const teamSnippets = [];
   const emails = new Set(pageData.extractedEmails || pageData.emails || []);
   const phones = new Set(pageData.extractedPhones || pageData.phones || []);
+  const allDiscoveredProfileLinks = [];
 
   const relevantPages = pages.slice(0, limits.pages).map((page) => {
     (page.people || []).forEach((person) => people.push(compactPerson({ ...person, sourceUrl: person.sourceUrl || page.url })));
     (page.teamSnippets || []).forEach((snippet) => teamSnippets.push({ sourceUrl: page.url || "", text: truncateText(snippet, limits.snippetChars) }));
     (page.extractedEmails || page.emails || []).forEach((email) => emails.add(email));
     (page.extractedPhones || page.phones || []).forEach((phone) => phones.add(phone));
+    
+    // Collect discovered profile links for prompt inclusion
+    if (page.discoveredProfileLinks?.length > 0) {
+      allDiscoveredProfileLinks.push(...page.discoveredProfileLinks.map(l => ({ href: l.href, source: page.url })));
+    }
 
     return {
       title: page.title || "",
@@ -252,6 +258,7 @@ function buildEmployeeResearchPayload(pageData = {}, tier = "normal") {
     teamSnippets: teamSnippets.slice(0, limits.snippets),
     emails: [...emails].slice(0, limits.emails),
     phones: [...phones].slice(0, limits.phones),
+    discoveredProfileLinks: allDiscoveredProfileLinks.slice(0, 50), // v10: Include discovered profile URLs
     pages: relevantPages
   };
 }
@@ -355,8 +362,22 @@ async function analyzeEmployeeDetailsChunked(settings, pageData = {}) {
 function buildEmployeePrompt(pageData = {}, tier = "normal", chunk = null) {
   const payload = buildEmployeeResearchPayload(pageData, tier);
   const chunkIntro = chunk ? "This is employee analysis chunk " + chunk.index + " of " + chunk.total + ". Only extract people supported by the pages in this chunk.\nPages in this chunk: " + chunk.pages.map((page) => page.url).filter(Boolean).join(" | ") + "\n\n" : "";
-  return `${chunkIntro}Analyze employees and team members from this research payload.\n\nRules:\n- Extract only people actually supported by the payload.\n- Prefer names with job titles, bios, profile URLs, emails, phones, or source URLs.\n- Deduplicate the same person across pages.\n- Use confidence values of high, medium, or low.\n- Include sourceUrl for each person whenever possible.\n- Return only valid JSON matching the employee schema. The top-level people array is required; do not use employees as the field name.
-- Use bio for role descriptions. companyLeadership must be an array of person objects using the same fields as people, not strings.\n\nResearch payload:\n${JSON.stringify(payload, null, 2)}`;
+  const profileLinkInstructions = payload.discoveredProfileLinks?.length > 0 
+    ? `\n- DISCOVERED PROFILE LINKS: The following profile URLs were found during crawling. If they appear in this chunk's pages or bodyText, extract person details from them:\n${payload.discoveredProfileLinks.map(l => `  * ${l.href} (found on ${l.source})`).join("\n")}\n` 
+    : "";
+  return `${chunkIntro}Analyze employees and team members from this research payload.${profileLinkInstructions}
+Rules:
+- Extract only people actually supported by the payload.
+- Prefer names with job titles, bios, profile URLs, emails, phones, or source URLs.
+- Deduplicate the same person across pages.
+- Use confidence values of high, medium, or low.
+- Include sourceUrl for each person whenever possible.
+- Return only valid JSON matching the employee schema. The top-level people array is required; do not use employees as the field name.
+- Use bio for role descriptions. companyLeadership must be an array of person objects using the same fields as people, not strings.
+- If discovered profile links are provided above and referenced in the content, treat them as valid sources for person extraction.
+
+Research payload:
+${JSON.stringify(payload, null, 2)}`;
 }
 
 
