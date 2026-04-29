@@ -602,6 +602,10 @@
     const textPeople = collectPeopleFromText();
     const people = mergePeople([...schemaPeople, ...domPeople, ...textPeople]);
     const structuredData = collectStructuredDataFromJsonLd();
+    
+    // v10: Also discover profile links during extraction
+    const discoveredProfileLinks = discoverProfileLinks();
+    
     return {
       title: document.title,
       url: location.href,
@@ -615,6 +619,7 @@
       extractedEmails,
       extractedPhones,
       teamSnippets: collectTeamSnippets(),
+      discoveredProfileLinks, // v10: Include discovered profile links
       extractionStats: {
         peopleFromJsonLd: schemaPeople.length,
         peopleFromDom: domPeople.length,

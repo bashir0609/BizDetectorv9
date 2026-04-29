@@ -224,6 +224,14 @@ function buildEmployeeResearchPayload(pageData = {}, tier = "normal") {
   const emails = new Set(pageData.extractedEmails || pageData.emails || []);
   const phones = new Set(pageData.extractedPhones || pageData.phones || []);
   const allDiscoveredProfileLinks = [];
+  
+  // v10: Also collect profile links from top-level discoveredProfileLinks array
+  if (pageData.discoveredProfileLinks?.length > 0) {
+    allDiscoveredProfileLinks.push(...pageData.discoveredProfileLinks.map(l => ({ 
+      href: typeof l === 'string' ? l : l.href, 
+      source: pageData.url || '' 
+    })));
+  }
 
   const relevantPages = pages.slice(0, limits.pages).map((page) => {
     (page.people || []).forEach((person) => people.push(compactPerson({ ...person, sourceUrl: person.sourceUrl || page.url })));
@@ -233,7 +241,10 @@ function buildEmployeeResearchPayload(pageData = {}, tier = "normal") {
     
     // Collect discovered profile links for prompt inclusion
     if (page.discoveredProfileLinks?.length > 0) {
-      allDiscoveredProfileLinks.push(...page.discoveredProfileLinks.map(l => ({ href: l.href, source: page.url })));
+      allDiscoveredProfileLinks.push(...page.discoveredProfileLinks.map(l => ({ 
+        href: typeof l === 'string' ? l : l.href, 
+        source: page.url || '' 
+      })));
     }
 
     return {
@@ -258,7 +269,7 @@ function buildEmployeeResearchPayload(pageData = {}, tier = "normal") {
     teamSnippets: teamSnippets.slice(0, limits.snippets),
     emails: [...emails].slice(0, limits.emails),
     phones: [...phones].slice(0, limits.phones),
-    discoveredProfileLinks: allDiscoveredProfileLinks.slice(0, 50), // v10: Include discovered profile URLs
+    discoveredProfileLinks: allDiscoveredProfileLinks.slice(0, 100), // v10: Include discovered profile URLs
     pages: relevantPages
   };
 }

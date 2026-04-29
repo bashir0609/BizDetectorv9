@@ -506,7 +506,8 @@ function compactPageData(page) {
     extractedPhones: (page.extractedPhones || []).slice(0, 20),
     extractionStats: page.extractionStats || null,
     teamSnippets: (page.teamSnippets || []).slice(0, 8).map((item) => cleanTextForAi(item, 260)),
-    bodyText: cleanTextForAi(page.bodyText, MAX_EMPLOYEE_PAGE_BODY_CHARS)
+    bodyText: cleanTextForAi(page.bodyText, MAX_EMPLOYEE_PAGE_BODY_CHARS),
+    discoveredProfileLinks: (page.discoveredProfileLinks || []).slice(0, 50)
   };
 }
 
@@ -526,6 +527,18 @@ function compactResearchPayload(pageData, isEmployee = false, maxPages = MAX_RES
     isEmployee = false;
   }
   const discoveredPages = (pageData.discoveredPages || []).slice(0, maxPages).map(compactPageData);
+  
+  // v10: Aggregate all discovered profile links from all pages
+  const allDiscoveredProfileLinks = [];
+  if (pageData.discoveredProfileLinks?.length > 0) {
+    allDiscoveredProfileLinks.push(...pageData.discoveredProfileLinks);
+  }
+  for (const page of discoveredPages) {
+    if (page.discoveredProfileLinks?.length > 0) {
+      allDiscoveredProfileLinks.push(...page.discoveredProfileLinks);
+    }
+  }
+  
   return {
     title: pageData.title,
     url: pageData.url,
@@ -539,7 +552,8 @@ function compactResearchPayload(pageData, isEmployee = false, maxPages = MAX_RES
     extractedPhones: (pageData.extractedPhones || []).slice(0, 30),
     extractionStats: pageData.extractionStats || null,
     teamSnippets: (pageData.teamSnippets || []).slice(0, 4).map((item) => trimText(item, 120)),
-    discoveredPages
+    discoveredPages,
+    discoveredProfileLinks: allDiscoveredProfileLinks.slice(0, 100)
   };
 }
 
