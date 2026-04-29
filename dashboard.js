@@ -1002,7 +1002,7 @@ async function waitForTabComplete(tabId) {
   });
 }
 
-async function extractPageDataFromTab(tabId) {
+async function extractPageDataFromTab(tabId, options = {}) {
   const tab = await chrome.tabs.get(tabId);
   if (!isSupportedUrl(tab.url)) {
     throw new Error("This page cannot be analyzed. Use a regular website URL.");
@@ -1013,6 +1013,21 @@ async function extractPageDataFromTab(tabId) {
       target: { tabId },
       files: ["shared/page-extractor.js"]
     });
+    
+    // v10: Support expandTeamPage option for deep extraction
+    if (options.expandTeamPage) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async () => {
+          if (globalThis.BTDPageExtractor?.expandTeamPage) {
+            await globalThis.BTDPageExtractor.expandTeamPage();
+          }
+        }
+      });
+      // Extra settle time after expansion
+      await sleep(1500);
+    }
+    
     results = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => globalThis.BTDPageExtractor?.extractPageData()
@@ -1029,6 +1044,62 @@ async function extractPageDataFromTab(tabId) {
     throw new Error("Unable to read that page.");
   }
   return pageData;
+}
+
+// v10: Discover profile links from a tab
+async function discoverProfileLinksFromTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["shared/page-extractor.js"]
+    });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => globalThis.BTDPageExtractor?.discoverProfileLinks()
+    });
+    return results?.[0]?.result || [];
+  } catch {
+    return [];
+  }
+}
+
+// v10: Calculate coverage score
+function calculateCoverageScoreForPeople(people, pageData) {
+  if (!globalThis.BTDPageExtractor?.calculateCoverageScore) {
+    // Fallback inline implementation
+    const hasTeamSection = /[tT]eam|[sS]taff|[pP]eople|[lL]eadership|[aA]gents|[rR]ealtors/.test(pageData.bodyText || "");
+    const hasMultipleProfiles = people.length >= 3;
+    const hasContactInfo = people.some(p => p.email || p.phone);
+    const hasTitles = people.some(p => p.title);
+    const hasLinkedin = people.some(p => p.linkedinUrl);
+    
+    let rawScore = 0;
+    if (hasTeamSection) rawScore += 20;
+    else rawScore += 10;
+    if (hasMultipleProfiles) rawScore += 25;
+    else if (people.length > 0) rawScore += 15;
+    if (hasContactInfo) rawScore += 15;
+    if (hasTitles) rawScore += 15;
+    if (hasLinkedin) rawScore += 10;
+    
+    const completeProfiles = people.filter(p => {
+      const fields = [p.name, p.title, p.email, p.phone].filter(Boolean);
+      return fields.length >= 2;
+    }).length;
+    const completenessRatio = people.length > 0 ? completeProfiles / people.length : 0;
+    rawScore += Math.round(completenessRatio * 15);
+    
+    const uniqueSources = new Set(people.map(p => p.sourceUrl)).size;
+    rawScore += Math.min(10, uniqueSources * 2);
+    
+    return {
+      total: Math.min(100, rawScore),
+      factors: { hasTeamSection, hasMultipleProfiles, hasContactInfo, hasTitles, hasLinkedin, uniqueSources },
+      warnings: [],
+      recommendations: []
+    };
+  }
+  return globalThis.BTDPageExtractor.calculateCoverageScore(people, pageData);
 }
 
 async function extractHomepageData(tabId) {
@@ -1589,9 +1660,19 @@ async function analyzeEmployeeDetailsForUrl(url) {
     setStage("Analyzing", "busy");
     setStatus("Extracting employee details with AI...");
 
+    // v10: Calculate coverage score before AI analysis
+    const allPeopleFromCrawl = validPages.flatMap(p => p.people || []);
+    const coverageScore = calculateCoverageScoreForPeople(
+      allPeopleFromCrawl,
+      { bodyText: validPages.map(p => p.bodyText || "").join(" ") }
+    );
+    
+    logDebug("Coverage Score Before AI", coverageScore);
+
     const pageData = {
       ...homepage,
-      discoveredPages: validPages
+      discoveredPages: validPages,
+      coverageScore // v10: Include coverage metadata
     };
 
     const response = await chrome.runtime.sendMessage({
