@@ -18,7 +18,7 @@ const CRAWL_SAFE_MODE_EXTRA_DELAY_MS = 1300;
 const CRAWL_TAB_SETTLE_MS = 500;
 const NON_HTML_RESOURCE_EXT = /\.(pdf|png|jpe?g|gif|webp|svg|zip|rar|7z|mp4|mp3|wav|avi|mov|m4a|docx?|xlsx?|pptx?)$/i;
 const BUSINESS_PAGE_KEYWORD_REGEX = /\b(service|services|solution|solutions|product|products|offering|offerings|what-we-do|capabilit|industry|industries|sector|sectors|about|about-us|company|our-company|overview|expertise|specialt|practice|portfolio|case-stud|work|clients?|markets?)\b/i;
-const TEAM_PAGE_KEYWORD_REGEX = /\b(team|our-team|people|staff|leadership|leaders|management|founders?|directors?|executives?|agents?|brokers?|realtors?|advisors?|who-we-are|meet-the-team|directory|professionals|about|about-us|company|office|locations?|contact)\b/i;
+const TEAM_PAGE_KEYWORD_REGEX = /\b(team|our-team|people|staff|leadership|leaders|management|founders?|directors?|executives?|agents?|brokers?|realtors?|advisors?|who-we-are|meet-the-team|directory|professionals|about|about-us|company|office|locations?|contact|profile[s]?|member[s]?|agent[s]?|sales-consultant|team-member|employee[s]?)\b/i;
 const DASH_LOG_PREFIX = "[BTD:Dashboard]";
 let debugLogsEnabled = true;
 
@@ -1109,6 +1109,7 @@ async function extractHomepageData(tabId) {
 async function fetchPageInBackground(url, options = {}) {
   const throttleMs = Math.max(0, Number(options.throttleMs) || 0);
   const settleMs = Math.max(0, Number(options.settleMs ?? CRAWL_TAB_SETTLE_MS) || 0);
+  const expandTeamPage = options.expandTeamPage ?? false;
   let tempTab = null;
   try {
     if (throttleMs > 0) {
@@ -1119,7 +1120,7 @@ async function fetchPageInBackground(url, options = {}) {
     if (settleMs > 0) {
       await sleep(settleMs);
     }
-    return await extractPageDataFromTab(tempTab.id);
+    return await extractPageDataFromTab(tempTab.id, { expandTeamPage });
   } catch {
     return null;
   } finally {
@@ -1139,7 +1140,9 @@ function gatherInternalLinks(pageData, rootOrigin, focus = "employee") {
           const parsed = new URL(href);
           if (parsed.origin !== rootOrigin) return { href, score: -1 };
           const haystack = `${parsed.pathname} ${text}`.toLowerCase();
-          if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack)) {
+          // Allow profile pages and agent pages even without explicit keywords
+          const isProfilePage = /\/(agent|profile|people|staff|team|member|realtor|broker)[s]?\/[^\/]+/i.test(parsed.pathname);
+          if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack) && !isProfilePage) {
             return { href, score: -1 }; // Force drop generic links
           }
         } catch {
@@ -1170,7 +1173,9 @@ function filterTeamCandidateUrlsFromHomepage(links, rootOrigin) {
         if (parsed.origin !== rootOrigin) return null;
         if (!isCrawlableUrl(parsed.toString())) return null;
         const haystack = `${parsed.pathname} ${text}`.toLowerCase();
-        if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack)) return null;
+        // Allow profile pages and agent pages even without explicit keywords
+        const isProfilePage = /\/(agent|profile|people|staff|team|member|realtor|broker)[s]?\/[^\/]+/i.test(parsed.pathname);
+        if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack) && !isProfilePage) return null;
         return {
           href: toCanonicalUrl(parsed.toString()),
           score: scoreLink({ href, text, source }, rootOrigin, "employee")
@@ -1237,8 +1242,9 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
   const focus = options.focus || "employee";
   const expandFromDiscovered = options.expandFromDiscovered ?? true;
   const includeHomepage = options.includeHomepage ?? true;
+  const expandTeamPage = options.expandTeamPage ?? false;
   const rootOrigin = new URL(homepage.url).origin;
-  logDebug("Crawl start", { rootOrigin, maxDepth, maxPages, focus, homepage: homepage.url, expandFromDiscovered, includeHomepage });
+  logDebug("Crawl start", { rootOrigin, maxDepth, maxPages, focus, homepage: homepage.url, expandFromDiscovered, includeHomepage, expandTeamPage });
   const pages = includeHomepage ? [homepage] : [];
   const visited = includeHomepage ? new Set([toCanonicalPageKey(homepage.url)]) : new Set();
   const queued = new Set();
@@ -1274,7 +1280,7 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     logDebug("Crawl visiting", { depth: next.depth, url: next.url, visited: pages.length, queued: queue.length });
 
     const crawlDelayMs = getCrawlDelayMs();
-    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs });
+    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs, expandTeamPage });
     if (!page || !isSupportedUrl(page.url)) continue;
 
     let canonicalPageUrl;
@@ -1647,6 +1653,7 @@ async function analyzeEmployeeDetailsForUrl(url) {
       seedUrls,
       includeHomepage: false,
       expandFromDiscovered: true,
+      expandTeamPage: true,
       onProgress: ({ visited, depth, queued }) => {
         setStage("Crawling", "busy");
         setStatus(`Crawling depth ${depth} (${visited}/${dynamicMaxPages} max pages)...`);
