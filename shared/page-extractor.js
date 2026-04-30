@@ -1,28 +1,196 @@
 (function () {
+  // v10: Enhanced team page expansion with scroll, load-more, and pagination support
   async function expandTeamPage() {
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-    const loadMorePatterns = /^(load more|show more|view more|see more|more agents|more team members|next page)$/i;
+    const loadMorePatterns = /^(load more|show more|view more|see more|more agents|more team members|more people|more staff|next page|load more team|load more agents|show all|view all)$/i;
+    const nextLinkPatterns = /^(next|›|»|next page|next ›|page \d+)$/i;
     
     let previousCount = 0;
-    const maxRounds = 8;
+    const maxRounds = 10;
+    const employeeCardSelectors = [
+      "[class*='team'] article", "[class*='team'] li",
+      "[class*='staff'] article", "[class*='staff'] li",
+      "[class*='people'] article", "[class*='people'] li",
+      "[class*='member'] article", "[class*='member'] li",
+      "[class*='card']", "[class*='employee-card']",
+      "[class*='agent-card']", "[class*='profile-card']",
+      "[class*='person-card']", "[class*='bio-card']",
+      "[role='listitem']", "[data-type='person']", "[data-entity='person']"
+    ].join(", ");
     
+    // Phase 1: Scroll expansion for infinite scroll
     for (let i = 0; i < maxRounds; i++) {
       window.scrollTo(0, document.body.scrollHeight);
-      await sleep(1200);
+      await sleep(1000);
       
-      const buttons = Array.from(document.querySelectorAll("button, a, div[role='button'], span[role='button']"));
+      const currentCount = document.querySelectorAll(employeeCardSelectors).length;
+      
+      if (currentCount <= previousCount && i >= 2) break;
+      previousCount = currentCount;
+    }
+    
+    // Phase 2: Click load-more buttons
+    previousCount = 0;
+    for (let i = 0; i < maxRounds; i++) {
+      const buttons = Array.from(document.querySelectorAll("button, a, div[role='button'], span[role='button'], input[type='button']"));
       const loadMoreBtn = buttons.find(btn => loadMorePatterns.test((btn.innerText || btn.textContent || "").trim()));
       
       if (loadMoreBtn) {
+        loadMoreBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+        await sleep(600);
         loadMoreBtn.click();
-        await sleep(1200);
+        await sleep(1500);
+        
+        // After click, also scroll to trigger any lazy loading
+        window.scrollTo(0, document.body.scrollHeight);
+        await sleep(800);
       }
       
-      const currentCount = document.querySelectorAll("[class*='team'] article, [class*='team'] li, [class*='staff'] article, [class*='staff'] li, [class*='people'] article, [class*='people'] li, [class*='member'] article, [class*='member'] li, [class*='card'], [class*='employee-card']").length;
+      const currentCount = document.querySelectorAll(employeeCardSelectors).length;
       
       if (currentCount <= previousCount && !loadMoreBtn) break;
       previousCount = currentCount;
     }
+    
+    // Phase 3: Check for pagination links (next page)
+    const paginationLinks = Array.from(document.querySelectorAll("a[href]"))
+      .filter(link => nextLinkPatterns.test((link.innerText || link.textContent || "").trim()));
+    
+    if (paginationLinks.length > 0) {
+      // Mark that pagination exists (caller can decide to follow)
+      window.__btdHasPagination = true;
+      window.__btdPaginationLinks = paginationLinks.slice(0, 5).map(l => l.href);
+    }
+    
+    // Final scroll to ensure all content is loaded
+    window.scrollTo(0, document.body.scrollHeight);
+    await sleep(1200);
+    window.scrollTo(0, 0);
+    await sleep(500);
+  }
+
+  // v10: Discover profile links from current page
+  function discoverProfileLinks() {
+    const profilePatterns = [
+      /\/agent[s]?\/[^\/]+/i,
+      /\/profile[s]?\/[^\/]+/i,
+      /\/people\/[^\/]+/i,
+      /\/staff\/[^\/]+/i,
+      /\/team\/[^\/]+/i,
+      /\/member[s]?\/[^\/]+/i,
+      /\/bio[s]?\/[^\/]+/i,
+      /\/realtor[s]?\/[^\/]+/i,
+      /\/broker[s]?\/[^\/]+/i,
+      /[?&](agent|profile|person|id)=\w+/i
+    ];
+    
+    const seen = new Set();
+    const results = [];
+    
+    const links = Array.from(document.querySelectorAll("a[href]"));
+    for (const link of links) {
+      const href = link.href;
+      if (!href || seen.has(href)) continue;
+      
+      const matchesPattern = profilePatterns.some(p => p.test(href));
+      if (!matchesPattern) continue;
+      
+      // Skip non-internal links
+      try {
+        const parsed = new URL(href);
+        if (parsed.origin !== location.origin) continue;
+      } catch {
+        continue;
+      }
+      
+      seen.add(href);
+      results.push({
+        href,
+        text: (link.innerText || link.textContent || "").trim().slice(0, 100),
+        source: location.href
+      });
+      
+      if (results.length >= 100) break;
+    }
+    
+    return results;
+  }
+
+  // v10: Coverage scoring for extraction completeness
+  function calculateCoverageScore(people, pageData) {
+    const score = {
+      total: 0,
+      factors: {},
+      warnings: [],
+      recommendations: []
+    };
+    
+    // Factor 1: People found vs expected signals
+    const hasTeamSection = /[tT]eam|[sS]taff|[pP]eople|[lL]eadership|[aA]gents|[rR]ealtors/.test(pageData.bodyText || "");
+    const hasMultipleProfiles = people.length >= 3;
+    const hasContactInfo = people.some(p => p.email || p.phone);
+    const hasTitles = people.some(p => p.title);
+    const hasLinkedin = people.some(p => p.linkedinUrl);
+    
+    if (hasTeamSection && people.length === 0) {
+      score.warnings.push("Team section detected but no employees extracted");
+      score.recommendations.push("Try expanding the page or checking for JavaScript-rendered content");
+    }
+    
+    // Factor 2: Data completeness per person
+    const completeProfiles = people.filter(p => {
+      const fields = [p.name, p.title, p.email, p.phone].filter(Boolean);
+      return fields.length >= 2;
+    }).length;
+    
+    const completenessRatio = people.length > 0 ? completeProfiles / people.length : 0;
+    
+    // Factor 3: Source diversity
+    const uniqueSources = new Set(people.map(p => p.sourceUrl)).size;
+    
+    // Calculate score (0-100)
+    let rawScore = 0;
+    
+    if (hasTeamSection) rawScore += 20;
+    else rawScore += 10; // No team section mentioned, might be OK
+    
+    if (hasMultipleProfiles) rawScore += 25;
+    else if (people.length > 0) rawScore += 15;
+    
+    if (hasContactInfo) rawScore += 15;
+    if (hasTitles) rawScore += 15;
+    if (hasLinkedin) rawScore += 10;
+    
+    rawScore += Math.round(completenessRatio * 15);
+    rawScore += Math.min(10, uniqueSources * 2);
+    
+    score.total = Math.min(100, rawScore);
+    
+    score.factors = {
+      hasTeamSection,
+      hasMultipleProfiles,
+      hasContactInfo,
+      hasTitles,
+      hasLinkedin,
+      completenessRatio: Math.round(completenessRatio * 100),
+      uniqueSources
+    };
+    
+    // Add recommendations based on gaps
+    if (!hasContactInfo && people.length > 0) {
+      score.recommendations.push("Consider extracting contact info from profile pages");
+    }
+    if (!hasLinkedin && people.length > 0) {
+      score.recommendations.push("LinkedIn profiles not found - may need manual research");
+    }
+    if (completenessRatio < 0.5 && people.length > 0) {
+      score.recommendations.push("Many profiles incomplete - try deeper extraction");
+    }
+    if (uniqueSources <= 1 && people.length > 5) {
+      score.recommendations.push("All profiles from single page - may have missed paginated content");
+    }
+    
+    return score;
   }
 
   function textValue(node) {
@@ -147,14 +315,129 @@
   }
 
   function isLikelyPersonName(name) {
-    if (!name || name.length < 4 || name.length > 60) return false;
-    const words = name.trim().split(/\s+/);
+    const text = String(name || "").replace(/\s+/g, " ").trim();
+
+    if (!text || text.length < 4 || text.length > 60) return false;
+    if (/[0-9@#$%^&*()_+=\[\]{};:"<>?\/|]/.test(text)) return false;
+
+    const words = text.split(/\s+/);
     if (words.length < 2 || words.length > 5) return false;
-    if (!words.every((word) => /^[A-Z]/.test(word))) return false;
-    const uiPhrases = /^(contact|home|about|services|our|the|get|learn|read|view|see|click|sign|log|call|email|send|submit|next|back|more|buy|sell|rent|find|search|menu|close|open|toggle|follow|share|book|request|download|upload|register|login|join|apply|explore|discover|navigate|skip|go to|back to|return|continue|cancel|confirm|yes|no|ok|done|save|edit|delete|add|remove|new|all|other|team|staff|people|company|office|phone|fax|address|website|social|media|news|blog|events|gallery|portfolio|careers|faqs?|privacy|terms|copyright|sitemap|policy)/i;
-    if (uiPhrases.test(name.trim())) return false;
-    if (/^(agent|sales|consultant|manager|director|executive|specialist|officer|coordinator)$/i.test(name.trim())) return false;
-    return !/[0-9@#$%^&*()_+=\[\]{};:"<>?\/|]/.test(name);
+
+    // Must look like human-name casing.
+    if (!words.every((word) => /^[A-Z][a-zA-Z'’.-]+$/.test(word))) return false;
+
+    const lower = text.toLowerCase();
+
+    // Generic navigation/action/page labels.
+    const uiPhraseStart =
+      /^(contact|home|about|services|our|the|get|learn|read|view|see|click|sign|log|call|email|send|submit|next|back|more|buy|sell|rent|find|search|menu|close|open|toggle|follow|share|book|request|download|upload|register|login|join|apply|explore|discover|navigate|skip|go to|back to|return|continue|cancel|confirm|save|edit|delete|add|remove|new|all|other|team|staff|people|company|office|phone|fax|address|website|social|media|news|blog|events|gallery|portfolio|careers|faqs?|privacy|terms|copyright|sitemap|policy|visit|award|awards|history|story|village|villages)\b/i;
+
+    if (uiPhraseStart.test(text)) return false;
+
+    // Generic non-person nouns often appearing in page headings/cards.
+    const nonPersonWords =
+      /\b(story|history|award|awards|village|villages|managers|management|portal|policy|privacy|terms|supplier|suppliers|career|careers|resident|residents|customer|customers|testimonial|testimonials|location|locations|community|communities|office|offices|contact|contacts|service|services|solution|solutions|property|properties)\b/i;
+
+    if (nonPersonWords.test(text)) return false;
+
+    // A row that is only role words is not a person.
+    if (/^(agent|sales|consultant|manager|managers|director|executive|specialist|officer|coordinator|assistant|administrator|principal|advisor|leader|leadership)$/i.test(text)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function findNearestTitleForName(nameNode, card) {
+    if (!nameNode || !card) return "";
+    const rolePattern =
+      /\b(principal|assistant property manager|property manager|sales|leasing|consultant|director|manager|head|chief|officer|ceo|founder|partner|associate|coordinator|executive)\b/i;
+
+    const candidates = [];
+
+    // 1. Same card text blocks
+    const nodes = Array.from(card.querySelectorAll(
+      "p, span, div, small, em, strong, b, h1, h2, h3, h4, h5, h6, [class*='title'], [class*='role'], [class*='position'], [class*='job']"
+    ));
+
+    for (const node of nodes) {
+      if (node === nameNode) continue;
+
+      const text = textValue(node);
+      if (!text || text.length > 140) continue;
+      if (text === textValue(nameNode)) continue;
+
+      if (rolePattern.test(text)) {
+        candidates.push(text);
+      }
+    }
+
+    // 2. Nearby siblings
+    let next = nameNode.nextElementSibling;
+    for (let i = 0; next && i < 4; i++, next = next.nextElementSibling) {
+      const text = textValue(next);
+      if (text && text.length <= 140 && rolePattern.test(text)) {
+        candidates.push(text);
+      }
+    }
+
+    let prev = nameNode.previousElementSibling;
+    for (let i = 0; prev && i < 4; i++, prev = prev.previousElementSibling) {
+      const text = textValue(prev);
+      if (text && text.length <= 140 && rolePattern.test(text)) {
+        candidates.push(text);
+      }
+    }
+
+    return candidates[0] || "";
+  }
+
+  function findNameNodeInCard(card) {
+    const selectors = [
+      "h1", "h2", "h3", "h4", "h5", "h6",
+      "strong", "b",
+      "[class*='name']",
+      "[itemprop='name']",
+      "a",
+      "p",
+      "span",
+      "div"
+    ];
+
+    for (const selector of selectors) {
+      const nodes = Array.from(card.querySelectorAll(selector)).slice(0, 30);
+
+      for (const node of nodes) {
+        const text = textValue(node);
+        if (isLikelyPersonName(text)) return node;
+      }
+    }
+
+    return null;
+  }
+
+  function findNameInCard(card) {
+  const selectors = [
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "strong", "b",
+    "[class*='name']",
+    "[itemprop='name']",
+    "a",
+    "p",
+    "span",
+    "div"
+  ];
+
+  for (const selector of selectors) {
+    const nodes = Array.from(card.querySelectorAll(selector)).slice(0, 20);
+
+      for (const node of nodes) {
+        const text = textValue(node);
+        if (isLikelyPersonName(text)) return text;
+      }
+    }
+
+    return "";
   }
 
   function mergePeople(people) {
@@ -180,7 +463,7 @@
       current.sourceTitle = current.sourceTitle || String(person.sourceTitle || document.title).trim();
       merged.set(key, current);
     }
-    return [...merged.values()].slice(0, 80);
+    return [...merged.values()].slice(0, 250);
   }
 
   function collectPeopleFromJsonLd() {
@@ -300,15 +583,23 @@
       "[class*='partner']", "[id*='partner']"
     ];
     const seen = new Set();
-    const teamContainers = Array.from(document.querySelectorAll(containerSelectors.join(","))).slice(0, 40);
+    const teamContainers = Array.from(document.querySelectorAll(containerSelectors.join(","))).slice(0, 80);
     for (const container of teamContainers) {
-      const cards = Array.from(container.querySelectorAll("article, li, [class*='card'], [class*='item'], [class*='entry'], div, section")).slice(0, 60);
+      const cards = Array.from(container.querySelectorAll("article, li, [class*='card'], [class*='item'], [class*='entry'], div, section")).slice(0, 140);
       for (const card of cards) {
         const cardText = textValue(card);
-        if (cardText.length > 600) continue;
-        const name = textValue(card.querySelector("h1, h2, h3, h4, h5, h6, strong, b, [class*='name'], [itemprop='name']")) || textValue(card.querySelector("a"));
+        const nameNode = findNameNodeInCard(card);
+        const name = textValue(nameNode);
+
+        if (!nameNode) continue;
+        if (cardText.length > 1500 && !isLikelyPersonName(name)) continue;
         if (!isLikelyPersonName(name) || seen.has(name.toLowerCase())) continue;
-        const role = textValue(card.querySelector("[class*='title'], [class*='role'], [class*='position'], [class*='designation'], [class*='job'], [itemprop='jobTitle'], p, span, small, em"));
+
+        const role =
+          findNearestTitleForName(nameNode, card) ||
+          textValue(card.querySelector(
+            "[class*='title'], [class*='role'], [class*='position'], [class*='designation'], [class*='job'], [itemprop='jobTitle'], p, span, small, em"
+          ));
         const emailLink = card.querySelector("a[href^='mailto:']");
         const phoneLink = card.querySelector("a[href^='tel:']");
         const linkedinLink = Array.from(card.querySelectorAll("a[href]")).find((link) => /linkedin\.com/i.test(link.href));
@@ -322,7 +613,7 @@
           sourceUrl: location.href,
           sourceTitle: document.title
         });
-        if (people.length >= 40) return mergePeople(people);
+        if (people.length >= 180) return mergePeople(people);
       }
     }
     return mergePeople(people);
@@ -360,7 +651,7 @@
   }
 
   function collectPeopleFromText() {
-    const lines = collectVisibleLines(30000);
+    const lines = collectVisibleLines(60000);
     const directoryPeople = collectPeopleFromDirectoryLines(lines);
     const text = lines.join(" ");
     const matches = [];
@@ -397,10 +688,28 @@
   function collectLinks() {
     const seen = new Set();
     const results = [];
+    function linkTextValue(node) {
+      const explicitText = textValue(node);
+      if (explicitText) return explicitText;
+      const labelledText = [
+        node.getAttribute?.("aria-label"),
+        node.getAttribute?.("title"),
+        node.getAttribute?.("data-title"),
+        node.getAttribute?.("data-label")
+      ].map((value) => String(value || "").trim()).find(Boolean);
+      if (labelledText) return labelledText;
+      try {
+        const parsed = new URL(node.href);
+        const slug = parsed.pathname.split("/").filter(Boolean).pop() || parsed.hostname;
+        return slug.replace(/[-_]+/g, " ").trim();
+      } catch {
+        return "";
+      }
+    }
     function addLinks(nodes, source) {
       for (const node of nodes) {
         const href = node.href;
-        const text = textValue(node);
+        const text = linkTextValue(node);
         if (!href || !text || seen.has(href)) continue;
         seen.add(href);
         results.push({ text, href, source });
@@ -408,6 +717,8 @@
     }
     const navSelectors = ["nav", "header nav", "[role='navigation']", "[class*='navbar']", "[class*='nav-bar']", "[class*='navigation']", "[class*='menu']", "[id*='menu']", "[id*='nav']", "header", "[class*='header']"];
     for (const selector of navSelectors) addLinks(document.querySelectorAll(`${selector} a[href]`), "nav");
+    const menuSelectors = ["[class*='drawer']", "[id*='drawer']", "[class*='offcanvas']", "[id*='offcanvas']", "[class*='mobile-menu']", "[id*='mobile-menu']", "[aria-label*='menu' i]", "[aria-labelledby*='menu' i]"];
+    for (const selector of menuSelectors) addLinks(document.querySelectorAll(`${selector} a[href]`), "menu");
     const footerSelectors = ["footer", "[role='contentinfo']", "[class*='footer']", "[id*='footer']"];
     for (const selector of footerSelectors) addLinks(document.querySelectorAll(`${selector} a[href]`), "footer");
     const sitemapSelectors = ["[class*='sitemap']", "[id*='sitemap']", "[class*='site-map']", "[id*='site-map']"];
@@ -415,7 +726,7 @@
     const profileSelectors = ["[class*='agent'] a", "[class*='staff'] a", "[class*='team'] a", "[class*='member'] a", "[class*='profile'] a", "[class*='people'] a", "[class*='person'] a", "[class*='consultant'] a", "[class*='advisor'] a"];
     for (const selector of profileSelectors) addLinks(document.querySelectorAll(selector), "profile");
     addLinks(document.querySelectorAll("a[href]"), "body");
-    return results.slice(0, 200);
+    return results.slice(0, 500);
   }
 
   function extractPageData() {
@@ -441,8 +752,10 @@
       headings,
       links: collectLinks(),
       metadata: collectMetadata(),
-      bodyText: collectVisibleText(25000),
+      bodyText: collectVisibleText(60000),
       people,
+      profileLinks: discoverProfileLinks(),
+      paginationLinks: globalThis.__btdPaginationLinks || [],
       structuredData,
       extractedEmails,
       extractedPhones,
@@ -461,6 +774,8 @@
 
   globalThis.BTDPageExtractor = {
     extractPageData,
-    expandTeamPage
+    expandTeamPage,
+    discoverProfileLinks,
+    calculateCoverageScore
   };
 })();

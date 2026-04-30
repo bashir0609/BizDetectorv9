@@ -1,17 +1,23 @@
 import { buildCsvRow, CSV_HEADER, downloadFile } from "./shared/export.js";
-import { dedupePeople, normalizePeople } from "./shared/people.js";
+import { normalizePeople } from "./shared/people.js";
+import { compactResearchPayload } from "./shared/payload-cleaning.js";
+import { buildCandidateUrls } from "./shared/team-page-discovery.js";
 import { fillList, renderEmployeeExtras, renderPeople as renderPeopleList, syncSettingsUI } from "./shared/ui.js";
 import { getSettings, saveSettings as saveSettingsStore, getLatestResult } from "./storage/manager.js";
 import { normalizeApiKeysInput, validateApiKey, validateProviderApiKeys } from "./engine/utils.js";
+import { isLocalOllamaBaseUrl } from "./config/settings.js";
 
 const LATEST_RESULT_KEY = "latestAnalysis";
 const MAX_RESEARCH_PAGES = 2;
-const MAX_EMPLOYEE_RESEARCH_PAGES = 10;
-const MAX_PAGE_BODY_CHARS = 700;
-const MAX_EMPLOYEE_PAGE_BODY_CHARS = 2400;
+const MAX_EMPLOYEE_RESEARCH_PAGES = 15;
+const MAX_PAGE_BODY_CHARS = 1400;
+const MAX_EMPLOYEE_PAGE_BODY_CHARS = 4800;
 const MAX_SUMMARY_BODY_CHARS = 1000;
 
 let latestResult = null;
+let currentRunController = null;
+const activeOperationIds = new Set();
+const openedTempTabIds = new Set();
 const elements = {
   settingsPanel: document.getElementById("settingsPanel"),
   compactBar: document.getElementById("compactBar"),
@@ -30,6 +36,7 @@ const elements = {
   janModel: document.getElementById("janModel"),
   analyze: document.getElementById("analyze"),
   analyzeEmployees: document.getElementById("analyzeEmployees"),
+  stopAnalysis: document.getElementById("stopAnalysis"),
   status: document.getElementById("status"),
   result: document.getElementById("result"),
   businessType: document.getElementById("businessType"),
@@ -52,6 +59,59 @@ function setStatus(message, isError = false) {
   elements.status.style.color = isError ? "#b42318" : "#486581";
 }
 
+function isStopRequested() {
+  return Boolean(currentRunController?.signal?.aborted);
+}
+
+function throwIfStopped() {
+  if (isStopRequested()) {
+    throw new DOMException("Analysis stopped.", "AbortError");
+  }
+}
+
+function isStoppedError(error) {
+  return error?.name === "AbortError" || /analysis stopped/i.test(String(error?.message || error || ""));
+}
+
+function createOperationId(prefix = "analysis") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function beginAnalysisRun() {
+  currentRunController = new AbortController();
+  setBusy(true);
+}
+
+function endAnalysisRun() {
+  currentRunController = null;
+  activeOperationIds.clear();
+  openedTempTabIds.clear();
+  setBusy(false);
+}
+
+async function sendAnalysisMessage(message, prefix = "analysis") {
+  throwIfStopped();
+  const operationId = createOperationId(prefix);
+  activeOperationIds.add(operationId);
+  try {
+    return await chrome.runtime.sendMessage({ ...message, operationId });
+  } finally {
+    activeOperationIds.delete(operationId);
+  }
+}
+
+async function stopCurrentAnalysis() {
+  if (!currentRunController || currentRunController.signal.aborted) return;
+  currentRunController.abort();
+  setStatus("Stopping analysis...");
+  for (const operationId of [...activeOperationIds]) {
+    chrome.runtime.sendMessage({ type: "cancel-analysis", operationId }).catch(() => { });
+  }
+  for (const tabId of [...openedTempTabIds]) {
+    chrome.tabs.remove(tabId).catch(() => { });
+  }
+}
+
 function showSettings() {
   elements.settingsPanel.classList.remove("hidden");
   elements.compactBar.classList.add("hidden");
@@ -65,6 +125,8 @@ function showResults() {
 function setBusy(isBusy) {
   elements.analyze.disabled = isBusy;
   elements.analyzeEmployees.disabled = isBusy || !latestResult?.url;
+  elements.stopAnalysis?.classList.toggle("hidden", !isBusy);
+  if (elements.stopAnalysis) elements.stopAnalysis.disabled = false;
 }
 
 function setEmployeeButtonState() {
@@ -90,6 +152,7 @@ async function loadSettings() {
 async function saveSettings() {
   const groqKey = elements.groqApiKey?.value;
   const geminiKey = elements.geminiApiKey?.value;
+  const ollamaKey = elements.ollamaApiKey?.value?.trim() || "";
   const provider = elements.provider?.value || "groq";
 
   // 1. Validate active provider key
@@ -97,19 +160,22 @@ async function saveSettings() {
     const val = validateProviderApiKeys("groq", groqKey);
     if (!val.valid) {
       setStatus(val.error, true);
-      return;
+      throw new Error(val.error);
     }
   } else if (provider === "gemini") {
     const val = validateProviderApiKeys("gemini", geminiKey);
     if (!val.valid) {
       setStatus(val.error, true);
-      return;
+      throw new Error(val.error);
     }
   } else if (provider === "ollama") {
-    const val = validateProviderApiKeys("ollama", elements.ollamaApiKey?.value);
-    if (!val.valid) {
-      setStatus(val.error, true);
-      return;
+    const ollamaBaseUrl = elements.ollamaBaseUrl?.value?.trim() || "https://ollama.com";
+    if (!isLocalOllamaBaseUrl(ollamaBaseUrl) || ollamaKey) {
+      const val = validateProviderApiKeys("ollama", ollamaKey);
+      if (!val.valid) {
+        setStatus(val.error, true);
+        throw new Error(val.error);
+      }
     }
   }
 
@@ -117,29 +183,32 @@ async function saveSettings() {
   if (groqKey && provider !== "groq") {
     const val = validateProviderApiKeys("groq", groqKey);
     if (!val.valid) {
-      setStatus(`Invalid Groq key: ${val.error}`, true);
-      return;
+      const message = `Invalid Groq key: ${val.error}`;
+      setStatus(message, true);
+      throw new Error(message);
     }
   }
   if (geminiKey && provider !== "gemini") {
     const val = validateProviderApiKeys("gemini", geminiKey);
     if (!val.valid) {
-      setStatus(`Invalid Gemini key: ${val.error}`, true);
-      return;
+      const message = `Invalid Gemini key: ${val.error}`;
+      setStatus(message, true);
+      throw new Error(message);
     }
   }
-  if (elements.ollamaApiKey?.value && provider !== "ollama") {
-    const val = validateProviderApiKeys("ollama", elements.ollamaApiKey.value);
+  if (ollamaKey && provider !== "ollama") {
+    const val = validateProviderApiKeys("ollama", ollamaKey);
     if (!val.valid) {
-      setStatus(`Invalid Ollama key: ${val.error}`, true);
-      return;
+      const message = `Invalid Ollama key: ${val.error}`;
+      setStatus(message, true);
+      throw new Error(message);
     }
   }
 
   const providerApiKeys = {
     groq: normalizeApiKeysInput(groqKey),
     gemini: normalizeApiKeysInput(geminiKey),
-    ollama: normalizeApiKeysInput(elements.ollamaApiKey?.value)
+    ollama: normalizeApiKeysInput(ollamaKey)
   };
   const ollamaBaseUrl = elements.ollamaBaseUrl?.value?.trim() || "https://ollama.com";
   const janBaseUrl = elements.janBaseUrl?.value?.trim() || "http://127.0.0.1:1337/v1";
@@ -147,12 +216,13 @@ async function saveSettings() {
   const preferences = { provider, ollamaBaseUrl, janBaseUrl, janModel };
   const localSettings = { ...preferences, providerApiKeys };
 
-  
+
   try {
     await saveSettingsStore(preferences, localSettings);
     setStatus("Settings saved.");
   } catch (error) {
     setStatus(error.message || "Save failed.", true);
+    throw error;
   }
 }
 
@@ -183,60 +253,6 @@ function renderPeople(target, people) {
   });
 }
 
-function trimText(value, limit) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  return text.length > limit ? `${text.slice(0, limit)}...` : text;
-}
-
-function compactPageData(page) {
-  return {
-    title: page.title,
-    url: page.url,
-    description: trimText(page.description, 160),
-    headings: (page.headings || []).slice(0, 6),
-    people: normalizePeople(page.people).slice(0, 80),
-    structuredData: compactStructuredData(page.structuredData),
-    extractedEmails: (page.extractedEmails || []).slice(0, 20),
-    extractedPhones: (page.extractedPhones || []).slice(0, 20),
-    extractionStats: page.extractionStats || null,
-    teamSnippets: (page.teamSnippets || []).slice(0, 8).map((item) => trimText(item, 260)),
-    bodyText: trimText(page.bodyText, MAX_EMPLOYEE_PAGE_BODY_CHARS)
-  };
-}
-
-function compactStructuredData(data) {
-  const source = data || {};
-  return {
-    organizations: (source.organizations || []).slice(0, 4),
-    contacts: (source.contacts || []).slice(0, 6),
-    addresses: (source.addresses || []).slice(0, 4),
-    socialLinks: (source.socialLinks || []).slice(0, 8)
-  };
-}
-
-function compactResearchPayload(pageData, isEmployee = false) {
-  const discoveredPages = (pageData.discoveredPages || []).slice(0, MAX_RESEARCH_PAGES).map(compactPageData);
-
-  // Use 12,000 chars for employees, 1,000 chars for quick business summary
-  const bodyLimit = isEmployee ? MAX_EMPLOYEE_PAGE_BODY_CHARS : MAX_SUMMARY_BODY_CHARS;
-
-  return {
-    title: pageData.title,
-    url: pageData.url,
-    description: trimText(pageData.description, 180),
-    headings: (pageData.headings || []).slice(0, 8),
-    metadata: Object.fromEntries(Object.entries(pageData.metadata || {}).slice(0, 8)),
-    bodyText: trimText(pageData.bodyText, bodyLimit), // Dynamic limit applied here
-    people: normalizePeople(pageData.people || []).slice(0, 100),
-    structuredData: compactStructuredData(pageData.structuredData),
-    extractedEmails: (pageData.extractedEmails || []).slice(0, 30),
-    extractedPhones: (pageData.extractedPhones || []).slice(0, 30),
-    extractionStats: pageData.extractionStats || null,
-    teamSnippets: (pageData.teamSnippets || []).slice(0, 4).map((item) => trimText(item, 120)),
-    discoveredPages
-  };
-}
-
 async function loadState() {
   setEmployeeButtonState();
 }
@@ -250,67 +266,27 @@ async function getCurrentTab() {
 }
 
 
-function getSiteRoot(url) {
-  const parsed = new URL(url);
-  return `${parsed.protocol}//${parsed.host}/`;
-}
-
-function scoreLink(link, origin, focus = "business") {
-  try {
-    const parsed = new URL(link.href);
-    if (parsed.origin !== origin) {
-      return -1;
-    }
-    let score = 0;
-    const haystack = `${link.text} ${parsed.pathname}`.toLowerCase();
-    if (focus === "employee") {
-      if (/(team|people|leadership|staff|management|founder|employee|our-team|meet-the-team|executive|board|advisor|who-we-are)/.test(haystack)) score += 12;
-      if (/(about|company|overview)/.test(haystack)) score += 8;
-      if (/(contact|locations|office)/.test(haystack)) score += 3;
-      if (/(services|solutions|what-we-do|capabilities)/.test(haystack)) score += 1;
-    } else {
-      if (/(services|solutions|what-we-do|capabilities|offerings|products)/.test(haystack)) score += 12;
-      if (/(about|company|overview)/.test(haystack)) score += 8;
-      if (/(industries|clients|portfolio|case-studies)/.test(haystack)) score += 4;
-      if (/(contact|locations|office)/.test(haystack)) score += 2;
-      if (/(team|people|leadership|staff|management|founder|employee|our-team|meet-the-team|executive|board|advisor|who-we-are)/.test(haystack)) score += 1;
-    }
-    if (parsed.pathname === "/" || parsed.pathname === "") score += 6;
-    if (parsed.hash) score -= 3;
-    return score;
-  } catch {
-    return -1;
-  }
-}
-
-function buildCandidateUrls(pageData, maxPages = MAX_RESEARCH_PAGES, focus = "business") {
-  const origin = new URL(pageData.url).origin;
-  const rankedLinks = (pageData.links || [])
-    .map((link) => ({ ...link, score: scoreLink(link, origin, focus) }))
-    .filter((link) => link.score >= 0)
-    .sort((a, b) => b.score - a.score);
-
-  const urls = [pageData.url, getSiteRoot(pageData.url)];
-  for (const link of rankedLinks) {
-    urls.push(link.href);
-    if (urls.length >= maxPages * 2) {
-      break;
-    }
-  }
-
-  return [...new Set(urls)].slice(0, maxPages);
-}
-
-async function waitForTabComplete(tabId) {
+async function waitForTabComplete(tabId, signal = null) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Analysis stopped.", "AbortError"));
+      return;
+    }
     const timeoutId = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(handleUpdated);
+      signal?.removeEventListener("abort", handleAbort);
       reject(new Error("The website took too long to load."));
     }, 10000);
 
     function cleanup() {
       clearTimeout(timeoutId);
       chrome.tabs.onUpdated.removeListener(handleUpdated);
+      signal?.removeEventListener("abort", handleAbort);
+    }
+
+    function handleAbort() {
+      cleanup();
+      reject(new DOMException("Analysis stopped.", "AbortError"));
     }
 
     function handleUpdated(updatedTabId, changeInfo, tab) {
@@ -324,6 +300,7 @@ async function waitForTabComplete(tabId) {
     }
 
     chrome.tabs.onUpdated.addListener(handleUpdated);
+    signal?.addEventListener("abort", handleAbort, { once: true });
     chrome.tabs.get(tabId).then((tab) => {
       if (tab.status === "complete") {
         cleanup();
@@ -341,7 +318,7 @@ async function extractPageDataFromTab(tabId) {
   if (!isSupportedUrl(tab.url)) {
     throw new Error("This page cannot be analyzed. Open a regular website first.");
   }
-  
+
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ["shared/page-extractor.js"]
@@ -355,7 +332,7 @@ async function extractPageDataFromTab(tabId) {
       }
     }
   });
-  
+
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => globalThis.BTDPageExtractor?.extractPageData()
@@ -373,13 +350,17 @@ async function extractPageDataFromTab(tabId) {
 async function fetchPageInBackground(url) {
   let openedTabId = null;
   try {
+    throwIfStopped();
     const tab = await chrome.tabs.create({ url, active: false });
     openedTabId = tab.id;
-    await waitForTabComplete(tab.id);
+    openedTempTabIds.add(openedTabId);
+    await waitForTabComplete(tab.id, currentRunController?.signal);
+    throwIfStopped();
     return await extractPageDataFromTab(tab.id);
   } finally {
     if (openedTabId) {
-      await chrome.tabs.remove(openedTabId).catch(() => {});
+      openedTempTabIds.delete(openedTabId);
+      await chrome.tabs.remove(openedTabId).catch(() => { });
     }
   }
 }
@@ -392,10 +373,12 @@ async function crawlEmployeePagesFromCurrentPage(primaryPage) {
 
   const pages = [];
   for (const url of urls) {
+    throwIfStopped();
     try {
       const page = await fetchPageInBackground(url);
       if (page) pages.push(page);
     } catch (error) {
+      if (isStoppedError(error)) throw error;
       console.warn("Employee page crawl skipped", url, error);
     }
   }
@@ -447,6 +430,7 @@ async function exportCsv() {
 }
 
 async function runAnalysisForTab(tabId) {
+  throwIfStopped();
   setStatus("Reading current page...");
   // Popup only analyzes the single current page; no background tab crawling.
   const primaryPage = await extractPageDataFromTab(tabId);
@@ -460,14 +444,20 @@ async function runAnalysisForTab(tabId) {
   };
 
   setStatus("Classifying business type, services, and team details...");
-  const response = await chrome.runtime.sendMessage({
+  const response = await sendAnalysisMessage({
     type: "analyze-page",
-    pageData: compactResearchPayload(pageData, false)
-  });
+    pageData: compactResearchPayload(pageData, {
+      isEmployee: false,
+      maxPages: MAX_RESEARCH_PAGES,
+      employeeBodyChars: MAX_EMPLOYEE_PAGE_BODY_CHARS,
+      summaryBodyChars: MAX_SUMMARY_BODY_CHARS
+    })
+  }, "business");
 
   if (!response?.ok) {
     throw new Error(response?.error || "Unknown analysis error.");
   }
+  throwIfStopped();
 
   const result = {
     ...response.result,
@@ -502,7 +492,7 @@ async function openSidePanel(windowId) {
 }
 
 async function analyzeCurrentTab() {
-  setBusy(true);
+  beginAnalysisRun();
   setStatus("Reading current page...");
   elements.result.classList.add("hidden");
 
@@ -516,17 +506,18 @@ async function analyzeCurrentTab() {
     await runAnalysisForTab(tab.id);
 
   } catch (error) {
-    setStatus(error.message || "Something went wrong.", true);
+    setStatus(isStoppedError(error) ? "Analysis stopped." : (error.message || "Something went wrong."), !isStoppedError(error));
   } finally {
-    setBusy(false);
+    endAnalysisRun();
   }
 }
 
 async function analyzeEmployeeDetailsForUrl(url) {
-  setBusy(true);
+  beginAnalysisRun();
   setStatus("Reading current page for employee details...");
 
   try {
+    throwIfStopped();
     await saveSettings();
     const tab = await getCurrentTab();
 
@@ -534,7 +525,7 @@ async function analyzeEmployeeDetailsForUrl(url) {
 
     setStatus("Finding employee/team pages...");
     const discoveredPages = await crawlEmployeePagesFromCurrentPage(primaryPage);
-    
+
     const coverage = {
       pagesCrawled: discoveredPages.length + 1,
       employeesFound: 0 // Will be calculated after analysis
@@ -551,14 +542,20 @@ async function analyzeEmployeeDetailsForUrl(url) {
     };
 
     setStatus("Extracting employee details...");
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendAnalysisMessage({
       type: "analyze-employee-details",
-      pageData: compactResearchPayload(pageData, true)
-    });
+      pageData: compactResearchPayload(pageData, {
+        isEmployee: true,
+        maxPages: MAX_EMPLOYEE_RESEARCH_PAGES,
+        employeeBodyChars: MAX_EMPLOYEE_PAGE_BODY_CHARS,
+        summaryBodyChars: MAX_SUMMARY_BODY_CHARS
+      })
+    }, "employee");
 
     if (!response?.ok) {
       throw new Error(response?.error || "Unknown employee analysis error.");
     }
+    throwIfStopped();
 
     const result = {
       ...(latestResult || {}),
@@ -580,9 +577,9 @@ async function analyzeEmployeeDetailsForUrl(url) {
     setStatus("Employee analysis complete.");
 
   } catch (error) {
-    setStatus(error.message || "Employee analysis failed.", true);
+    setStatus(isStoppedError(error) ? "Analysis stopped." : (error.message || "Employee analysis failed."), !isStoppedError(error));
   } finally {
-    setBusy(false);
+    endAnalysisRun();
   }
 }
 
@@ -601,6 +598,9 @@ elements.analyzeEmployees.addEventListener("click", () => {
   analyzeEmployeeDetailsForUrl(latestResult.url).catch((error) => {
     setStatus(error.message || "Employee analysis failed.", true);
   });
+});
+elements.stopAnalysis?.addEventListener("click", () => {
+  stopCurrentAnalysis().catch((error) => setStatus(error.message || "Stop failed.", true));
 });
 elements.openDashboard.addEventListener("click", () => {
   chrome.tabs.create({ url: chrome.runtime.getURL("dashboard.html") }).catch((error) => {

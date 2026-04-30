@@ -2,7 +2,7 @@ import { DEFAULT_SETTINGS } from "../config/settings.js";
 import { SYSTEM_PROMPTS } from "../config/prompts.js";
 import { validateApiKey } from "../engine/utils.js";
 
-export async function fetchGroqModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType = "business") {
+export async function fetchGroqModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType = "business", signal = null) {
   const resolvedKey = apiKey || settings.apiKey;
   
   // Validate API key before making request
@@ -37,7 +37,8 @@ export async function fetchGroqModelResponse(settings, promptText, model, maxTok
       "Authorization": `Bearer ${resolvedKey}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
 
   if (!response.ok) {

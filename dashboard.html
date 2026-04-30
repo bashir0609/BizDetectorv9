@@ -53,31 +53,15 @@
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="5" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M1 14c0-3 2-5 5-5h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="11" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
             Analyze employees
           </button>
-        </div>
 
-        <!-- Status strip (shows during / after analysis) -->
-        <div id="statusStrip" class="status-strip status-strip--idle">
-          <span id="statusIcon" class="status-icon">idle</span>
-          <span id="status" aria-live="polite">Ready</span>
-          <span id="stageBadge" class="stage-badge stage-badge--idle">Idle</span>
-        </div>
-
-        <!-- Progress bar -->
-        <div class="prog-track">
-          <div id="progressBar" class="prog-bar"></div>
+          <button id="stopAnalysis" class="btn-secondary btn-danger hidden" title="Stop the current analysis">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>
+            Stop analysis
+          </button>
         </div>
 
         <!-- Result metrics (visible after analysis) -->
         <div class="metrics-grid">
-          <div class="metric">
-            <div class="metric-label">Business type</div>
-            <div id="businessType" class="metric-val">-</div>
-            <span id="confidence" class="metric-pill hidden"></span>
-          </div>
-          <div class="metric">
-            <div class="metric-label">Industry</div>
-            <div id="industry" class="metric-val metric-val--sm">-</div>
-          </div>
           <div class="metric">
             <div class="metric-label">People</div>
             <div id="peopleCount" class="metric-val">0</div>
@@ -134,11 +118,11 @@
             <div id="ollamaFields" class="hidden">
               <label class="field">
                 <span class="field-label">Ollama API keys</span>
-                <textarea id="ollamaApiKey" rows="4" placeholder="One Ollama API key per line" autocomplete="off"></textarea>
+                <textarea id="ollamaApiKey" rows="4" placeholder="Optional for local Ollama; one cloud key per line" autocomplete="off"></textarea>
               </label>
               <label class="field">
                 <span class="field-label">Ollama API URL</span>
-                <input id="ollamaBaseUrl" type="url" placeholder="https://ollama.com">
+                <input id="ollamaBaseUrl" type="url" placeholder="https://ollama.com or http://localhost:11434">
               </label>
             </div>
 
@@ -198,6 +182,17 @@
           <button class="nav-tab"        data-tab="evidence" role="tab" aria-selected="false">Evidence <span class="tab-badge hidden" id="badge-evidence"></span></button>
           <button class="nav-tab"        data-tab="raw"      role="tab" aria-selected="false">Raw JSON</button>
         </nav>
+
+        <div class="content-status-region">
+          <div id="statusStrip" class="status-strip status-strip--idle">
+            <span id="statusIcon" class="status-icon">idle</span>
+            <span id="status" aria-live="polite">Ready</span>
+            <span id="stageBadge" class="stage-badge stage-badge--idle">Idle</span>
+          </div>
+          <div class="prog-track">
+            <div id="progressBar" class="prog-bar"></div>
+          </div>
+        </div>
 
         <div class="tab-body">
 

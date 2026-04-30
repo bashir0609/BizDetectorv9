@@ -1,12 +1,5 @@
 import { STORAGE_KEYS, DEFAULT_SETTINGS } from "../config/settings.js";
 
-const LEGACY_OLLAMA_LOCAL_URLS = new Set([
-  "http://localhost:11434",
-  "http://localhost:11434/",
-  "http://127.0.0.1:11434",
-  "http://127.0.0.1:11434/"
-]);
-
 export async function getSettings() {
   const stored = await chrome.storage.sync.get(STORAGE_KEYS);
   const sessionStored = await chrome.storage.session.get(STORAGE_KEYS);
@@ -27,9 +20,6 @@ export async function getSettings() {
     ...(sessionStored.providerApiKeys || {})
   };
   settings.providerApiKeys = providerApiKeys;
-  if (LEGACY_OLLAMA_LOCAL_URLS.has(String(settings.ollamaBaseUrl || "").trim())) {
-    settings.ollamaBaseUrl = DEFAULT_SETTINGS.ollamaBaseUrl;
-  }
 
   return settings;
 }

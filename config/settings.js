@@ -7,6 +7,15 @@ export const DEFAULT_SETTINGS = {
   rateLimitSafeMode: false
 };
 
+export function isLocalOllamaBaseUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export const STORAGE_KEYS = ["providerApiKeys", "provider", "ollamaBaseUrl", "janBaseUrl", "janModel", "debugLogsEnabled", "rateLimitSafeMode"];
 
 export const PROVIDER_LABELS = {

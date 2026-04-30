@@ -71,9 +71,10 @@ export function renderEmployeeExtras(container, result = {}, options = {}) {
   const existing = container.querySelector(".employee-extras");
   if (existing) existing.remove();
 
+  const showChunks = options.showChunks !== false;
   const warnings = result.warnings || result.employeeWarnings || [];
   const leadership = normalizePeople(result.companyLeadership || []);
-  const chunks = Array.isArray(result.employeeChunks) ? result.employeeChunks : [];
+  const chunks = showChunks && Array.isArray(result.employeeChunks) ? result.employeeChunks : [];
   if (!warnings.length && !leadership.length && !chunks.length) return;
 
   const wrapper = document.createElement("div");

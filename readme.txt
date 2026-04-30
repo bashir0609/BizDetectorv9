@@ -13,7 +13,7 @@ Business Type Detector is a Chrome extension that automatically classifies a web
 - **Flexible Provider Support**:
   - **Groq**: High-speed cloud inference.
   - **Gemini**: Google AI Studio integration.
-  - **Ollama**: Local LLM support for privacy and offline use.
+  - **Ollama**: Hosted Ollama Cloud with an API key, or local Ollama at `http://localhost:11434` without a key.
 - **Results Management**:
   - **Popup UI**: Quick analysis and result viewing.
   - **Side Panel**: Persistent view of the latest results and API key management.
@@ -30,5 +30,5 @@ Business Type Detector is a Chrome extension that automatically classifies a web
 
 1. Load the extension in Chrome via `chrome://extensions` using "Load unpacked".
 2. Open the extension popup and go to "Provider & API Key".
-3. Select your preferred provider and enter the required API key or URL.
+3. Select your preferred provider and enter the required API key or URL. Local Ollama can use `http://localhost:11434` with the API key field left blank.
 4. Click "Analyze Current Tab" to start.

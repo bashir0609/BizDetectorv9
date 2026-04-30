@@ -1,4 +1,5 @@
 import { SYSTEM_PROMPTS } from "../config/prompts.js";
+import { isLocalOllamaBaseUrl } from "../config/settings.js";
 export async function fetchOllamaModelCatalog(ollamaBaseUrl, apiKey = "") {
   const tagsUrl = `${ollamaBaseUrl.replace(/\/+$/, "")}/api/tags`;
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
@@ -20,11 +21,11 @@ export async function fetchJanModelCatalog(janBaseUrl) {
   return (payload?.data || []).map((m) => m.id);
 }
 
-export async function fetchLocalModelResponse(settings, promptText, model, maxTokens, analysisType = "business") {
+export async function fetchLocalModelResponse(settings, promptText, model, maxTokens, analysisType = "business", signal = null) {
   const selectedPrompt = SYSTEM_PROMPTS[analysisType] || SYSTEM_PROMPTS.business;
   const systemContent = `${selectedPrompt.persona}\n\n${selectedPrompt.instructions}`;
   if (settings.provider === "ollama") {
-    return fetchOllamaApiResponse(settings, promptText, model, maxTokens, analysisType);
+    return fetchOllamaApiResponse(settings, promptText, model, maxTokens, analysisType, signal);
   }
 
   const baseUrl = settings.provider === "jan"
@@ -35,6 +36,7 @@ export async function fetchLocalModelResponse(settings, promptText, model, maxTo
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({
       model,
       temperature: 0.2,
@@ -63,21 +65,24 @@ export async function fetchLocalModelResponse(settings, promptText, model, maxTo
   return response.json();
 }
 
-async function fetchOllamaApiResponse(settings, promptText, model, maxTokens, analysisType = "business") {
+async function fetchOllamaApiResponse(settings, promptText, model, maxTokens, analysisType = "business", signal = null) {
   const selectedPrompt = SYSTEM_PROMPTS[analysisType] || SYSTEM_PROMPTS.business;
   const systemContent = `${selectedPrompt.persona}\n\n${selectedPrompt.instructions}`;
   const apiKey = String(settings.providerApiKeys?.ollama || settings.apiKey || "").split(/[\r\n,]+/).map((key) => key.trim()).filter(Boolean)[0] || "";
-  if (!apiKey) {
+  const baseUrl = (settings.ollamaBaseUrl || "https://ollama.com").replace(/\/+$/, "");
+  if (!apiKey && !isLocalOllamaBaseUrl(baseUrl)) {
     throw new Error("Missing API key for Ollama.");
   }
 
-  const baseUrl = (settings.ollamaBaseUrl || "https://ollama.com").replace(/\/+$/, "");
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
   const response = await fetch(`${baseUrl}/api/chat`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
+    headers,
+    signal,
     body: JSON.stringify({
       model,
       stream: false,

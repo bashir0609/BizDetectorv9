@@ -24,6 +24,7 @@
 
           <div class="actions" style="margin-top:8px">
             <button id="analyzeEmployees" class="secondary" disabled>Analyze Employee Details</button>
+            <button id="stopAnalysis" class="secondary danger hidden">Stop Analysis</button>
             <button id="openDashboard" class="secondary">Open Dashboard</button>
           </div>
 
@@ -57,14 +58,14 @@
             </div>
 
             <div id="ollamaFields" class="hidden">
-              <p class="subtle">Using Ollama's hosted API. Create an API key at ollama.com/settings/keys.</p>
+              <p class="subtle">Use Ollama Cloud with an API key, or local Ollama at http://localhost:11434 without a key.</p>
               <label class="field">
                 <span>Ollama API Key</span>
-                <textarea id="ollamaApiKey" rows="3" placeholder="One Ollama API key per line" autocomplete="off"></textarea>
+                <textarea id="ollamaApiKey" rows="3" placeholder="Optional for local Ollama; one cloud key per line" autocomplete="off"></textarea>
               </label>
               <label class="field">
                 <span>Ollama API URL</span>
-                <input id="ollamaBaseUrl" type="url" placeholder="https://ollama.com">
+                <input id="ollamaBaseUrl" type="url" placeholder="https://ollama.com or http://localhost:11434">
               </label>
             </div>
 

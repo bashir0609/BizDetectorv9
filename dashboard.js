@@ -1,16 +1,23 @@
 import { buildCsvRow, CSV_HEADER, downloadFile } from "./shared/export.js";
 import { dedupePeople, normalizePeople } from "./shared/people.js";
+import { compactResearchPayload, compactStructuredData, trimText } from "./shared/payload-cleaning.js";
 import { fillList as fillSharedList, renderEmployeeExtras, renderPeople as renderPeopleList, syncSettingsUI } from "./shared/ui.js";
+import {
+  buildTeamDiscoveryPlan,
+  gatherInternalLinks,
+  scoreLink
+} from "./shared/team-page-discovery.js";
 import { getSettings, saveSettings as saveSettingsStore, getLatestResult as getLatestResultStore, setLatestResult as setLatestResultStore } from "./storage/manager.js";
 import { normalizeApiKeysInput, validateApiKey, validateProviderApiKeys } from "./engine/utils.js";
+import { isLocalOllamaBaseUrl } from "./config/settings.js";
 
 const LATEST_RESULT_KEY = "latestAnalysis";
 const KW_STORAGE_KEY = "serviceKeywords";
 const MAX_RESEARCH_PAGES = 8;
 const MAX_CRAWL_DEPTH = 5;
-const MAX_CRAWL_PAGES = 15;
-const MAX_PAGE_BODY_CHARS = 700;
-const MAX_EMPLOYEE_PAGE_BODY_CHARS = 2400;
+const MAX_CRAWL_PAGES = 8;
+const MAX_PAGE_BODY_CHARS = 1400;
+const MAX_EMPLOYEE_PAGE_BODY_CHARS = 8000;
 const MAX_SUMMARY_BODY_CHARS = 1000;
 const CRAWL_BASE_DELAY_MS = 1200;
 const CRAWL_JITTER_MS = 900;
@@ -18,7 +25,6 @@ const CRAWL_SAFE_MODE_EXTRA_DELAY_MS = 1300;
 const CRAWL_TAB_SETTLE_MS = 500;
 const NON_HTML_RESOURCE_EXT = /\.(pdf|png|jpe?g|gif|webp|svg|zip|rar|7z|mp4|mp3|wav|avi|mov|m4a|docx?|xlsx?|pptx?)$/i;
 const BUSINESS_PAGE_KEYWORD_REGEX = /\b(service|services|solution|solutions|product|products|offering|offerings|what-we-do|capabilit|industry|industries|sector|sectors|about|about-us|company|our-company|overview|expertise|specialt|practice|portfolio|case-stud|work|clients?|markets?)\b/i;
-const TEAM_PAGE_KEYWORD_REGEX = /\b(team|our-team|people|staff|leadership|leaders|management|founders?|directors?|executives?|agents?|brokers?|realtors?|advisors?|who-we-are|meet-the-team|directory|professionals|about|about-us|company|office|locations?|contact)\b/i;
 const DASH_LOG_PREFIX = "[BTD:Dashboard]";
 let debugLogsEnabled = true;
 
@@ -28,6 +34,9 @@ let rateLimitSafeMode = false;
 let siteAnalysisInFlight = false;
 let employeeAnalysisInFlight = false;
 let employeeAnalysisInFlightRoot = "";
+let currentRunController = null;
+const activeOperationIds = new Set();
+const openedTempTabIds = new Set();
 let autoTriggerTimeout = null;
 const autoEmployeeTriggerAtByRoot = new Map();
 const AUTO_EMPLOYEE_TRIGGER_COOLDOWN_MS = 2 * 60 * 1000;
@@ -35,6 +44,60 @@ let launchQueryHandled = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function isStopRequested() {
+  return Boolean(currentRunController?.signal?.aborted);
+}
+
+function throwIfStopped() {
+  if (isStopRequested()) {
+    throw new DOMException("Analysis stopped.", "AbortError");
+  }
+}
+
+function createOperationId(prefix = "analysis") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function beginAnalysisRun() {
+  currentRunController = new AbortController();
+  setBusy(true);
+}
+
+function endAnalysisRun() {
+  currentRunController = null;
+  activeOperationIds.clear();
+  openedTempTabIds.clear();
+  setBusy(false);
+}
+
+async function sendAnalysisMessage(message, prefix = "analysis") {
+  throwIfStopped();
+  const operationId = createOperationId(prefix);
+  activeOperationIds.add(operationId);
+  try {
+    return await chrome.runtime.sendMessage({ ...message, operationId });
+  } finally {
+    activeOperationIds.delete(operationId);
+  }
+}
+
+async function stopCurrentAnalysis() {
+  if (!currentRunController || currentRunController.signal.aborted) return;
+  currentRunController.abort();
+  setStatus("Stopping analysis...");
+  setStage("Stopping", "busy");
+  for (const operationId of [...activeOperationIds]) {
+    chrome.runtime.sendMessage({ type: "cancel-analysis", operationId }).catch(() => { });
+  }
+  for (const tabId of [...openedTempTabIds]) {
+    chrome.tabs.remove(tabId).catch(() => { });
+  }
+}
+
+function isStoppedError(error) {
+  return error?.name === "AbortError" || /analysis stopped/i.test(String(error?.message || error || ""));
 }
 
 function friendlyErrorMessage(error) {
@@ -78,6 +141,7 @@ const elements = {
   analyzeUrl: document.getElementById("analyzeUrl"),
   analyzeCurrent: document.getElementById("analyzeCurrent"),
   analyzeEmployees: document.getElementById("analyzeEmployees"),
+  stopAnalysis: document.getElementById("stopAnalysis"),
   statusStrip: document.getElementById("statusStrip"),
   statusIcon: document.getElementById("statusIcon"),
   status: document.getElementById("status"),
@@ -173,6 +237,9 @@ function setBusy(isBusy) {
   elements.analyzeUrl.disabled = isBusy;
   elements.analyzeCurrent.disabled = isBusy;
   elements.analyzeEmployees.disabled = isBusy || !latestResult?.url;
+  elements.stopAnalysis?.classList.toggle("hidden", !isBusy);
+  if (elements.stopAnalysis) elements.stopAnalysis.disabled = false;
+  window.BTDDashboardUI?.setAnalyzeBusyVisual(isBusy);
 }
 
 function setEmployeeButtonState() {
@@ -188,6 +255,7 @@ function updateProviderFields(provider) {
   elements.geminiFields.classList.toggle("hidden", !isGemini);
   elements.ollamaFields.classList.toggle("hidden", !isOllama);
   if (elements.janFields) elements.janFields.classList.toggle("hidden", !isJan);
+  window.BTDDashboardUI?.syncProviderFields(provider);
 }
 
 async function loadSettings() {
@@ -215,7 +283,7 @@ async function loadSettings() {
         if (models.length > 0) {
           const dataList = document.getElementById("janModelList");
           if (dataList) {
-            dataList.innerHTML = ""; 
+            dataList.innerHTML = "";
             models.forEach(id => {
               const opt = document.createElement("option");
               opt.value = id;
@@ -234,6 +302,7 @@ async function loadSettings() {
 async function saveSettings() {
   const groqKey = elements.groqApiKey?.value;
   const geminiKey = elements.geminiApiKey?.value;
+  const ollamaKey = elements.ollamaApiKey?.value?.trim() || "";
   const provider = elements.provider?.value || "groq";
 
   // 1. Validate active provider key
@@ -241,19 +310,22 @@ async function saveSettings() {
     const val = validateProviderApiKeys("groq", groqKey);
     if (!val.valid) {
       setStatus(val.error, true);
-      return;
+      throw new Error(val.error);
     }
   } else if (provider === "gemini") {
     const val = validateProviderApiKeys("gemini", geminiKey);
     if (!val.valid) {
       setStatus(val.error, true);
-      return;
+      throw new Error(val.error);
     }
   } else if (provider === "ollama") {
-    const val = validateProviderApiKeys("ollama", elements.ollamaApiKey?.value);
-    if (!val.valid) {
-      setStatus(val.error, true);
-      return;
+    const ollamaBaseUrl = elements.ollamaBaseUrl?.value?.trim() || "https://ollama.com";
+    if (!isLocalOllamaBaseUrl(ollamaBaseUrl) || ollamaKey) {
+      const val = validateProviderApiKeys("ollama", ollamaKey);
+      if (!val.valid) {
+        setStatus(val.error, true);
+        throw new Error(val.error);
+      }
     }
   }
 
@@ -261,38 +333,41 @@ async function saveSettings() {
   if (groqKey && provider !== "groq") {
     const val = validateProviderApiKeys("groq", groqKey);
     if (!val.valid) {
-      setStatus(`Invalid Groq key: ${val.error}`, true);
-      return;
+      const message = `Invalid Groq key: ${val.error}`;
+      setStatus(message, true);
+      throw new Error(message);
     }
   }
   if (geminiKey && provider !== "gemini") {
     const val = validateProviderApiKeys("gemini", geminiKey);
     if (!val.valid) {
-      setStatus(`Invalid Gemini key: ${val.error}`, true);
-      return;
+      const message = `Invalid Gemini key: ${val.error}`;
+      setStatus(message, true);
+      throw new Error(message);
     }
   }
-  if (elements.ollamaApiKey?.value && provider !== "ollama") {
-    const val = validateProviderApiKeys("ollama", elements.ollamaApiKey.value);
+  if (ollamaKey && provider !== "ollama") {
+    const val = validateProviderApiKeys("ollama", ollamaKey);
     if (!val.valid) {
-      setStatus(`Invalid Ollama key: ${val.error}`, true);
-      return;
+      const message = `Invalid Ollama key: ${val.error}`;
+      setStatus(message, true);
+      throw new Error(message);
     }
   }
 
   const providerApiKeys = {
     groq: normalizeApiKeysInput(groqKey),
     gemini: normalizeApiKeysInput(geminiKey),
-    ollama: normalizeApiKeysInput(elements.ollamaApiKey?.value)
+    ollama: normalizeApiKeysInput(ollamaKey)
   };
   const ollamaBaseUrl = elements.ollamaBaseUrl?.value?.trim() || "https://ollama.com";
   const janBaseUrl = elements.janBaseUrl?.value?.trim() || "http://127.0.0.1:1337/v1";
   const janModel = elements.janModel?.value?.trim() || "";
 
-  
+
   const nextDebugLogsEnabled = elements.debugLogsEnabled ? !!elements.debugLogsEnabled.checked : true;
   const nextRateLimitSafeMode = elements.rateLimitSafeMode ? !!elements.rateLimitSafeMode.checked : false;
-  
+
   debugLogsEnabled = nextDebugLogsEnabled;
   rateLimitSafeMode = nextRateLimitSafeMode;
 
@@ -387,24 +462,6 @@ function normalizeUrl(input) {
   return /^https?:\/\//i.test(value) ? value : `https://${value}`;
 }
 
-function cleanTextForAi(value, maxChars) {
-  const noisePattern = /(cookie|privacy policy|terms of use|accept all|subscribe|newsletter|all rights reserved)/i;
-  const lines = String(value || "")
-    .split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter(Boolean)
-    .filter((line) => !noisePattern.test(line));
-  const deduped = [];
-  const seen = new Set();
-  for (const line of lines) {
-    const key = line.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(line);
-  }
-  return deduped.join("\n").slice(0, maxChars);
-}
-
 function renderPeople(target, people) {
   renderPeopleList(target, people, {
     employeeAnalysisComplete: !!latestResult?.employeeAnalysisComplete,
@@ -456,7 +513,7 @@ function renderPeopleGrid(target, people) {
       ? "No team or people details found."
       : "Run Analyze Employees to load people.";
     target.appendChild(msg);
-    renderEmployeeExtras(target, latestResult || {});
+    renderEmployeeExtras(target, latestResult || {}, { showChunks: false });
     return;
   }
   const table = document.createElement("table");
@@ -486,61 +543,74 @@ function renderPeopleGrid(target, people) {
   }
   table.appendChild(tbody);
   target.appendChild(table);
-  renderEmployeeExtras(target, latestResult || {});
+  renderEmployeeExtras(target, latestResult || {}, { showChunks: false });
 }
 
-function trimText(value, limit) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  return text.length > limit ? `${text.slice(0, limit)}...` : text;
-}
-
-function compactPageData(page) {
-  return {
-    title: page.title,
-    url: page.url,
-    description: trimText(page.description, 160),
-    headings: (page.headings || []).slice(0, 6),
-    people: normalizePeople(page.people).slice(0, 80),
-    structuredData: compactStructuredData(page.structuredData),
-    extractedEmails: (page.extractedEmails || []).slice(0, 20),
-    extractedPhones: (page.extractedPhones || []).slice(0, 20),
-    extractionStats: page.extractionStats || null,
-    teamSnippets: (page.teamSnippets || []).slice(0, 8).map((item) => cleanTextForAi(item, 260)),
-    bodyText: cleanTextForAi(page.bodyText, MAX_EMPLOYEE_PAGE_BODY_CHARS)
-  };
-}
-
-function compactStructuredData(data) {
-  const source = data || {};
-  return {
-    organizations: (source.organizations || []).slice(0, 4),
-    contacts: (source.contacts || []).slice(0, 6),
-    addresses: (source.addresses || []).slice(0, 4),
-    socialLinks: (source.socialLinks || []).slice(0, 8)
-  };
-}
-
-function compactResearchPayload(pageData, isEmployee = false, maxPages = MAX_RESEARCH_PAGES) {
-  if (typeof isEmployee === "number") {
-    maxPages = isEmployee;
-    isEmployee = false;
+function renderClassificationStrip(result) {
+  if (!elements.classificationStrip) return;
+  if (!result) {
+    elements.classificationStrip.classList.add("hidden");
+    elements.classificationStrip.style.setProperty("display", "none", "important");
+    delete elements.classificationStrip.dataset.visible;
+    return;
   }
-  const discoveredPages = (pageData.discoveredPages || []).slice(0, maxPages).map(compactPageData);
-  return {
-    title: pageData.title,
-    url: pageData.url,
-    description: trimText(pageData.description, 180),
-    headings: (pageData.headings || []).slice(0, 8),
-    metadata: Object.fromEntries(Object.entries(pageData.metadata || {}).slice(0, 8)),
-    bodyText: trimText(pageData.bodyText, isEmployee ? MAX_EMPLOYEE_PAGE_BODY_CHARS : MAX_SUMMARY_BODY_CHARS),
-    people: normalizePeople(pageData.people).slice(0, 100),
-    structuredData: compactStructuredData(pageData.structuredData),
-    extractedEmails: (pageData.extractedEmails || []).slice(0, 30),
-    extractedPhones: (pageData.extractedPhones || []).slice(0, 30),
-    extractionStats: pageData.extractionStats || null,
-    teamSnippets: (pageData.teamSnippets || []).slice(0, 4).map((item) => trimText(item, 120)),
-    discoveredPages
-  };
+
+  elements.classificationStrip.classList.remove("hidden");
+  elements.classificationStrip.style.setProperty("display", "flex", "important");
+  elements.classificationStrip.dataset.visible = "1";
+  window.BTDDashboardUI?.activateTab("summary");
+
+  if (elements.csBusinessType) {
+    elements.csBusinessType.textContent = result.businessType || "Unknown";
+  }
+  if (elements.csIndustry) {
+    elements.csIndustry.textContent = result.industry || "-";
+  }
+
+  if (elements.csServices) {
+    elements.csServices.replaceChildren();
+    const services = Array.isArray(result.services) ? result.services : (result.services ? [String(result.services)] : []);
+    if (services.length) {
+      for (const svc of services) {
+        const tag = document.createElement("span");
+        tag.className = "cs-service-tag";
+        tag.textContent = svc;
+        elements.csServices.appendChild(tag);
+      }
+    } else {
+      const emptyTag = document.createElement("span");
+      emptyTag.className = "placeholder-text";
+      emptyTag.textContent = "No specific services detected.";
+      elements.csServices.appendChild(emptyTag);
+    }
+  }
+
+  if (elements.csConfidenceWrap) {
+    if (typeof result.confidence === "number") {
+      if (elements.csConfidence) {
+        elements.csConfidence.textContent = `${Math.round(result.confidence * 100)}% confidence`;
+      }
+      elements.csConfidenceWrap.classList.remove("hidden");
+    } else {
+      elements.csConfidenceWrap.classList.add("hidden");
+    }
+  }
+}
+
+function buildConciseTeamSummary(chunkResults = [], mergedPeople = []) {
+  const summaries = chunkResults
+    .map((item) => String(item?.teamSummary || "").trim())
+    .filter(Boolean);
+  const unique = [...new Set(summaries)];
+  const peopleCount = normalizePeople(mergedPeople).length;
+  if (!unique.length) {
+    return peopleCount > 0 ? `Team profile compiled from ${peopleCount} identified people across crawled pages.` : "";
+  }
+
+  const top = unique.slice(0, 3);
+  const base = top.join(" ");
+  const suffix = unique.length > 3 ? ` Additional team signals observed across ${unique.length} chunks.` : "";
+  return `${base}${suffix}`.trim();
 }
 
 // Service keyword triggers
@@ -642,36 +712,41 @@ function checkAndAutoTriggerEmployee(result) {
 
 function renderResult(result) {
   latestResult = result;
+  renderClassificationStrip(result);
   if (!result) {
     elements.result.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
-    elements.classificationStrip.classList.add("hidden");
     elements.peopleCount.textContent = "0";
     elements.pageCount.textContent = "0";
+    window.BTDDashboardUI?.updateTabBadges();
     setEmployeeButtonState();
     return;
   }
 
   elements.emptyState.classList.add("hidden");
   elements.result.classList.remove("hidden");
-  elements.businessType.textContent = result.businessType || "Unknown";
+  if (elements.businessType) elements.businessType.textContent = result.businessType || "Unknown";
   const confidence = typeof result.confidence === "number" ? `${Math.round(result.confidence * 100)}%` : "n/a";
-  elements.confidence.textContent = `Confidence: ${confidence}`;
+  if (elements.confidence) elements.confidence.textContent = `Confidence: ${confidence}`;
   elements.summary.textContent = result.summary || "";
-  elements.industry.textContent = result.industry || "";
+  if (elements.industry) elements.industry.textContent = result.industry || "";
   elements.peopleCount.textContent = String(normalizePeople(result.people).length);
   elements.pageCount.textContent = String(result.researchedPageCount || 0);
   elements.websiteSignals.textContent = result.websiteSignals || "";
   fillList(elements.services, result.services);
   renderPeople(elements.people, result.people);
-  renderEmployeeExtras(elements.people.parentElement, result, { headingTag: "h4" });
+  renderEmployeeExtras(elements.people.parentElement, result, { headingTag: "h4", showChunks: false });
   if (elements.peopleGrid) {
     const people = normalizePeople(result.people);
     const leadership = normalizePeople(result.companyLeadership || []);
     const warnings = result.warnings || result.employeeWarnings || [];
     if (people.length || leadership.length || warnings.length || result.employeeAnalysisComplete) {
       elements.peopleGridPanel.classList.remove("hidden");
-      renderPeopleGrid(elements.peopleGrid, result.people);
+      try {
+        renderPeopleGrid(elements.peopleGrid, result.people);
+      } catch (error) {
+        console.warn("People grid render failed", error);
+      }
     } else {
       elements.peopleGridPanel.classList.add("hidden");
     }
@@ -679,35 +754,9 @@ function renderResult(result) {
   elements.teamSummary.textContent = result.teamSummary || "Run Analyze Employee Details to load team information.";
   fillList(elements.evidence, result.evidence);
   elements.raw.textContent = JSON.stringify(result, null, 2);
+  window.BTDDashboardUI?.updateTabBadges();
   updateDomainBadge(result.url);
   elements.recentSiteNote.textContent = `Latest site analyzed: ${result.url}`;
-
-  elements.csBusinessType.textContent = result.businessType || "Unknown";
-  elements.csIndustry.textContent = result.industry || "-";
-  elements.csServices.replaceChildren();
-
-  const services = result.services && result.services.length ? result.services : [];
-  if (services.length) {
-    for (const svc of services) {
-      const tag = document.createElement("span");
-      tag.className = "cs-service-tag";
-      tag.textContent = svc;
-      elements.csServices.appendChild(tag);
-    }
-  } else {
-    // NEW: Show a clear empty state in the Summary tab instead of a dash
-    const emptyTag = document.createElement("span");
-    emptyTag.className = "placeholder-text";
-    emptyTag.textContent = "No specific services detected.";
-    elements.csServices.appendChild(emptyTag);
-  }
-  if (typeof result.confidence === "number") {
-    elements.csConfidence.textContent = `${Math.round(result.confidence * 100)}% confidence`;
-    elements.csConfidenceWrap.classList.remove("hidden");
-  } else {
-    elements.csConfidenceWrap.classList.add("hidden");
-  }
-  elements.classificationStrip.classList.remove("hidden");
 
   setEmployeeButtonState();
   if (result && !result.employeeAnalysisComplete && !employeeAnalysisInFlight) {
@@ -790,138 +839,6 @@ async function copyJson() {
 }
 
 
-function getSiteRoot(url) {
-  const parsed = new URL(url);
-  return `${parsed.protocol}//${parsed.host}/`;
-}
-
-function scoreLink(link, origin, focus = "business") {
-  try {
-    const parsed = new URL(link.href);
-    if (parsed.origin !== origin) return -1;
-    let score = 0;
-
-    // The haystack combines the visible link text and the URL path
-    const haystack = `${link.text} ${parsed.pathname}`.toLowerCase();
-
-    if (link.source === "nav") score += 6;
-    if (link.source === "footer") score += 4;
-    if (link.source === "sitemap") score += 5;
-    if (link.source === "profile") score += 8;
-
-    if (focus === "employee") {
-      // 1. High Value: Explicit team/agent keywords anywhere in the text or URL
-      const isHighValue = /\b(team|people|staff|crew|leadership|leaders|management|founders?|directors?|executives?|board|advisors?|partners?|agents?|brokers?|realtors?|professionals|attorneys|lawyers|doctors|therapists)\b/i.test(haystack) || /(ourteam|meettheteam|ourpeople|whoweare)/i.test(haystack);
-
-      // 2. Medium Value: General company information pages
-      const isAbout = /\b(about|about-?us|company|our-?story|overview|who-?we-?are)\b/i.test(haystack);
-
-      // 3. Low Value: Contact pages where agent directories sometimes hide
-      const isContact = /\b(contact|locations?|offices?)\b/i.test(haystack);
-
-      // 4. Noise: Places we definitely do not want to crawl for employees
-      const isNoise = /\b(blog|news|press|jobs|careers|products|services|pricing|faq|support|category|article)\b/i.test(parsed.pathname);
-
-      if (isHighValue) score += 20;
-      else if (isAbout) score += 10;
-      else if (isContact) score += 5;
-
-      if (isNoise) score -= 15;
-
-    } else {
-      // --- Business Focus Scoring ---
-      const isServices = /\b(services?|solutions?|what-?we-?do|capabilities|offerings?|products?|expertise|specialties|practice-?areas)\b/i.test(haystack);
-      const isAbout = /\b(about|company|about-?us|our-?story|who-?we-?are|overview)\b/i.test(haystack);
-      const isPortfolio = /\b(industries|clients|portfolio|case-?studies|projects|results|work)\b/i.test(haystack);
-      const isNoise = /\b(blog|news|press|jobs|careers|faq|support|help|team|people|staff|agents)\b/i.test(parsed.pathname);
-
-      if (isServices) score += 20;
-      else if (isAbout) score += 12;
-      else if (isPortfolio) score += 8;
-
-      if (isNoise) score -= 10;
-    }
-
-    if (parsed.pathname === "/" || parsed.pathname === "") score += (focus === "employee" ? 1 : 6);
-    if (parsed.hash) score -= 3;
-
-    return score;
-  } catch {
-    return -1;
-  }
-}
-
-function buildCandidateUrls(pageData, maxPages = MAX_RESEARCH_PAGES, focus = "business") {
-  const origin = new URL(pageData.url).origin;
-  const rankedLinks = (pageData.links || [])
-    .map((link) => ({ ...link, score: scoreLink(link, origin, focus) }))
-    .filter((link) => link.score > 0)
-    .sort((a, b) => b.score - a.score);
-  const seedUrls = focus === "employee" ? [pageData.url] : [pageData.url, getSiteRoot(pageData.url)];
-  const urls = [...seedUrls];
-  for (const link of rankedLinks) {
-    if (!urls.includes(link.href)) urls.push(link.href);
-    if (urls.length >= maxPages + 2) break;
-  }
-  return [...new Set(urls)].slice(0, maxPages);
-}
-
-function buildEmployeeFallbackUrls(siteUrl, links = [], maxPages = 14) {
-  const origin = new URL(siteUrl).origin;
-  const normalizedLinks = (links || [])
-    .map((link) => ({
-      text: link.text || "",
-      href: link.href || link.url || "",
-      source: link.source || "cached"
-    }))
-    .filter((link) => {
-      try {
-        return link.href && new URL(link.href).origin === origin;
-      } catch {
-        return false;
-      }
-    });
-
-  const rankedLinks = normalizedLinks
-    .map((link) => ({ ...link, score: scoreLink(link, origin, "employee") }))
-    .filter((link) => link.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((link) => link.href);
-
-  const commonPaths = [
-    "/agents",
-    "/agents/",
-    "/agent",
-    "/agent/",
-    "/consultants",
-    "/consultants/",
-    "/meet-our-team",
-    "/meet-our-team/",
-    "/meet-the-team",
-    "/meet-the-team/",
-    "/our-team",
-    "/our-team/",
-    "/team",
-    "/team/",
-    "/people",
-    "/staff",
-    "/team-members",
-    "/about/meet-the-team",
-    "/about/meet-the-team/",
-    "/about/our-team",
-    "/about/our-team/",
-    "/about/team",
-    "/about/team/",
-    "/about",
-    "/about-us",
-    "/about-us/our-team",
-    "/about-us/team",
-    "/contact"
-  ].map((path) => `${origin}${path}`);
-
-  return [...new Set([...commonPaths, ...rankedLinks])].slice(0, maxPages);
-}
-
 function buildBusinessFallbackUrls(siteUrl, maxPages = 10) {
   const origin = new URL(siteUrl).origin;
   const commonPaths = [
@@ -957,12 +874,17 @@ function buildBusinessFallbackUrls(siteUrl, maxPages = 10) {
   return [...new Set(commonPaths)].slice(0, maxPages);
 }
 
-async function waitForTabComplete(tabId) {
+async function waitForTabComplete(tabId, signal = null) {
   return new Promise((resolve, reject) => {
     let loadingFallbackId = null;
+    if (signal?.aborted) {
+      reject(new DOMException("Analysis stopped.", "AbortError"));
+      return;
+    }
     const timeoutId = setTimeout(() => {
       clearTimeout(loadingFallbackId);
       chrome.tabs.onUpdated.removeListener(handleUpdated);
+      signal?.removeEventListener("abort", handleAbort);
       chrome.tabs.get(tabId).then(resolve).catch(() => {
         reject(new Error("The website took too long to load."));
       });
@@ -972,6 +894,12 @@ async function waitForTabComplete(tabId) {
       clearTimeout(timeoutId);
       clearTimeout(loadingFallbackId);
       chrome.tabs.onUpdated.removeListener(handleUpdated);
+      signal?.removeEventListener("abort", handleAbort);
+    }
+
+    function handleAbort() {
+      cleanup();
+      reject(new DOMException("Analysis stopped.", "AbortError"));
     }
 
     function handleUpdated(updatedTabId, changeInfo, tab) {
@@ -990,6 +918,7 @@ async function waitForTabComplete(tabId) {
     }
 
     chrome.tabs.onUpdated.addListener(handleUpdated);
+    signal?.addEventListener("abort", handleAbort, { once: true });
     chrome.tabs.get(tabId).then((tab) => {
       if (tab.status === "complete") {
         cleanup();
@@ -1002,7 +931,7 @@ async function waitForTabComplete(tabId) {
   });
 }
 
-async function extractPageDataFromTab(tabId) {
+async function extractPageDataFromTab(tabId, options = {}) {
   const tab = await chrome.tabs.get(tabId);
   if (!isSupportedUrl(tab.url)) {
     throw new Error("This page cannot be analyzed. Use a regular website URL.");
@@ -1013,6 +942,21 @@ async function extractPageDataFromTab(tabId) {
       target: { tabId },
       files: ["shared/page-extractor.js"]
     });
+
+    // v10: Support expandTeamPage option for deep extraction
+    if (options.expandTeamPage) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async () => {
+          if (globalThis.BTDPageExtractor?.expandTeamPage) {
+            await globalThis.BTDPageExtractor.expandTeamPage();
+          }
+        }
+      });
+      // Extra settle time after expansion
+      await sleep(1500);
+    }
+
     results = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => globalThis.BTDPageExtractor?.extractPageData()
@@ -1031,6 +975,62 @@ async function extractPageDataFromTab(tabId) {
   return pageData;
 }
 
+// v10: Discover profile links from a tab
+async function discoverProfileLinksFromTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["shared/page-extractor.js"]
+    });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => globalThis.BTDPageExtractor?.discoverProfileLinks()
+    });
+    return results?.[0]?.result || [];
+  } catch {
+    return [];
+  }
+}
+
+// v10: Calculate coverage score
+function calculateCoverageScoreForPeople(people, pageData) {
+  if (!globalThis.BTDPageExtractor?.calculateCoverageScore) {
+    // Fallback inline implementation
+    const hasTeamSection = /[tT]eam|[sS]taff|[pP]eople|[lL]eadership|[aA]gents|[rR]ealtors/.test(pageData.bodyText || "");
+    const hasMultipleProfiles = people.length >= 3;
+    const hasContactInfo = people.some(p => p.email || p.phone);
+    const hasTitles = people.some(p => p.title);
+    const hasLinkedin = people.some(p => p.linkedinUrl);
+
+    let rawScore = 0;
+    if (hasTeamSection) rawScore += 20;
+    else rawScore += 10;
+    if (hasMultipleProfiles) rawScore += 25;
+    else if (people.length > 0) rawScore += 15;
+    if (hasContactInfo) rawScore += 15;
+    if (hasTitles) rawScore += 15;
+    if (hasLinkedin) rawScore += 10;
+
+    const completeProfiles = people.filter(p => {
+      const fields = [p.name, p.title, p.email, p.phone].filter(Boolean);
+      return fields.length >= 2;
+    }).length;
+    const completenessRatio = people.length > 0 ? completeProfiles / people.length : 0;
+    rawScore += Math.round(completenessRatio * 15);
+
+    const uniqueSources = new Set(people.map(p => p.sourceUrl)).size;
+    rawScore += Math.min(10, uniqueSources * 2);
+
+    return {
+      total: Math.min(100, rawScore),
+      factors: { hasTeamSection, hasMultipleProfiles, hasContactInfo, hasTitles, hasLinkedin, uniqueSources },
+      warnings: [],
+      recommendations: []
+    };
+  }
+  return globalThis.BTDPageExtractor.calculateCoverageScore(people, pageData);
+}
+
 async function extractHomepageData(tabId) {
   return await extractPageDataFromTab(tabId);
 }
@@ -1038,90 +1038,31 @@ async function extractHomepageData(tabId) {
 async function fetchPageInBackground(url, options = {}) {
   const throttleMs = Math.max(0, Number(options.throttleMs) || 0);
   const settleMs = Math.max(0, Number(options.settleMs ?? CRAWL_TAB_SETTLE_MS) || 0);
+  const signal = options.signal || currentRunController?.signal || null;
   let tempTab = null;
   try {
+    throwIfStopped();
     if (throttleMs > 0) {
       await sleep(throttleMs);
+      throwIfStopped();
     }
     tempTab = await chrome.tabs.create({ url, active: false });
-    await waitForTabComplete(tempTab.id);
+    openedTempTabIds.add(tempTab.id);
+    await waitForTabComplete(tempTab.id, signal);
     if (settleMs > 0) {
       await sleep(settleMs);
+      throwIfStopped();
     }
     return await extractPageDataFromTab(tempTab.id);
-  } catch {
+  } catch (error) {
+    if (isStoppedError(error)) throw error;
     return null;
   } finally {
-    if (tempTab?.id) await chrome.tabs.remove(tempTab.id).catch(() => { });
+    if (tempTab?.id) {
+      openedTempTabIds.delete(tempTab.id);
+      await chrome.tabs.remove(tempTab.id).catch(() => { });
+    }
   }
-}
-
-function gatherInternalLinks(pageData, rootOrigin, focus = "employee") {
-  const ranked = (pageData?.links || [])
-    .map((link) => {
-      const href = link?.href || link?.url || "";
-      const text = String(link?.text || "").trim();
-
-      // STRICT FILTER: If it's an employee crawl, drop anything that doesn't look like a team page
-      if (focus === "employee") {
-        try {
-          const parsed = new URL(href);
-          if (parsed.origin !== rootOrigin) return { href, score: -1 };
-          const haystack = `${parsed.pathname} ${text}`.toLowerCase();
-          if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack)) {
-            return { href, score: -1 }; // Force drop generic links
-          }
-        } catch {
-          return { href, score: -1 };
-        }
-      }
-
-      return {
-        href,
-        score: scoreLink({ href, text, source: link?.source || "body" }, rootOrigin, focus)
-      };
-    })
-    .filter((link) => link.score > -1 && isCrawlableUrl(link.href)) // Only follow valid scores
-    .sort((a, b) => b.score - a.score)
-    .map((link) => link.href);
-
-  return [...new Set(ranked)];
-}
-
-function filterTeamCandidateUrlsFromHomepage(links, rootOrigin) {
-  const ranked = (links || [])
-    .map((link) => {
-      const href = link?.href || link?.url || "";
-      const text = String(link?.text || "").trim();
-      const source = link?.source || "body";
-      try {
-        const parsed = new URL(href);
-        if (parsed.origin !== rootOrigin) return null;
-        if (!isCrawlableUrl(parsed.toString())) return null;
-        const haystack = `${parsed.pathname} ${text}`.toLowerCase();
-        if (!TEAM_PAGE_KEYWORD_REGEX.test(haystack)) return null;
-        return {
-          href: toCanonicalUrl(parsed.toString()),
-          score: scoreLink({ href, text, source }, rootOrigin, "employee")
-        };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean)
-    .sort((a, b) => b.score - a.score);
-
-  const deduped = [];
-  const seen = new Set();
-  for (const item of ranked) {
-    const key = toCanonicalPageKey(item.href);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(item.href);
-    if (deduped.length >= MAX_CRAWL_PAGES) break;
-  }
-
-  return deduped;
 }
 
 function filterBusinessCandidateUrlsFromHomepage(links, rootOrigin) {
@@ -1161,6 +1102,7 @@ function filterBusinessCandidateUrlsFromHomepage(links, rootOrigin) {
 }
 
 async function crawlSiteFromHomepage(homepage, options = {}) {
+  throwIfStopped();
   const maxDepth = options.maxDepth ?? MAX_CRAWL_DEPTH;
   const maxPages = options.maxPages ?? MAX_CRAWL_PAGES;
   const focus = options.focus || "employee";
@@ -1194,6 +1136,7 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
   }
 
   while (queue.length && pages.length < maxPages) {
+    throwIfStopped();
     const next = queue.shift();
     if (!next || next.depth > maxDepth) continue;
 
@@ -1203,7 +1146,8 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     logDebug("Crawl visiting", { depth: next.depth, url: next.url, visited: pages.length, queued: queue.length });
 
     const crawlDelayMs = getCrawlDelayMs();
-    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs });
+    const page = await fetchPageInBackground(next.url, { throttleMs: crawlDelayMs, signal: currentRunController?.signal });
+    throwIfStopped();
     if (!page || !isSupportedUrl(page.url)) continue;
 
     let canonicalPageUrl;
@@ -1220,6 +1164,13 @@ async function crawlSiteFromHomepage(homepage, options = {}) {
     if (visited.has(pageKey)) continue;
     visited.add(pageKey);
     pages.push(page);
+    if (typeof options.onPage === "function") {
+      try {
+        await options.onPage(page, { depth: next.depth, visited: pages.length, queued: queue.length, url: next.url });
+      } catch (error) {
+        logDebug("onPage callback failed", error);
+      }
+    }
 
     if (!expandFromDiscovered) continue;
     if (next.depth >= maxDepth || pages.length >= maxPages) continue;
@@ -1253,6 +1204,7 @@ async function analyzeTab(tabId, preferredUrl = "") {
   siteAnalysisInFlight = true;
   const previousResult = latestResult ? { ...latestResult } : null;
   try {
+    throwIfStopped();
     logDebug("Analyze tab start", { tabId });
     setStage("Loading", "busy");
     setStatus("Reading homepage links...");
@@ -1272,7 +1224,7 @@ async function analyzeTab(tabId, preferredUrl = "") {
       }
       const fallbackRoot = toRootUrl(fallbackSeedUrl);
       setStatus("Detected browser error page. Retrying with background fetch...");
-      currentPage = await fetchPageInBackground(fallbackRoot);
+      currentPage = await fetchPageInBackground(fallbackRoot, { signal: currentRunController?.signal });
       if (!currentPage) {
         throw new Error(`Could not load ${fallbackRoot}. The website may be down or blocked.`);
       }
@@ -1280,7 +1232,8 @@ async function analyzeTab(tabId, preferredUrl = "") {
     const rootUrl = toRootUrl(currentPage.url);
     const homepage = toCanonicalUrl(currentPage.url) === toCanonicalUrl(rootUrl)
       ? currentPage
-      : (await fetchPageInBackground(rootUrl)) || currentPage;
+      : (await fetchPageInBackground(rootUrl, { signal: currentRunController?.signal })) || currentPage;
+    throwIfStopped();
 
     await updatePartialResult({
       analyzedAt: new Date().toISOString(),
@@ -1345,15 +1298,17 @@ async function analyzeTab(tabId, preferredUrl = "") {
 
     const extraPages = [];
     for (let index = 0; index < pickedUrls.length; index++) {
+      throwIfStopped();
       const pageUrl = pickedUrls[index];
       const crawlDelayMs = getCrawlDelayMs();
       setStatus(`Fetching related page ${index + 1}/${pickedUrls.length}...`);
       logDebug("Business crawl fetch", { index: index + 1, total: pickedUrls.length, url: pageUrl, delayMs: crawlDelayMs });
-      const page = await fetchPageInBackground(pageUrl, { throttleMs: crawlDelayMs });
+      const page = await fetchPageInBackground(pageUrl, { throttleMs: crawlDelayMs, signal: currentRunController?.signal });
       if (page) {
         extraPages.push(page);
       }
     }
+    throwIfStopped();
     const allPages = [homepage, ...extraPages.filter(Boolean)];
     logDebug("Fetched business pages", { requested: pickedUrls.length, fetched: allPages.length });
     const allPeople = dedupePeople(allPages.flatMap(p => p.people || [])).slice(0, 25);
@@ -1382,7 +1337,7 @@ async function analyzeTab(tabId, preferredUrl = "") {
       extractedEmails: homepage.extractedEmails || [],
       extractedPhones: homepage.extractedPhones || [],
       extractionStats: homepage.extractionStats || null,
-      teamSnippets: allTeamSnippets.slice(0, 4).map(s => trimText(s, 120)),
+      teamSnippets: allTeamSnippets.slice(0, 4).map(s => trimText(s, 240)),
       discoveredPages: allPages.map(p => ({
         title: p.title,
         url: p.url,
@@ -1400,14 +1355,15 @@ async function analyzeTab(tabId, preferredUrl = "") {
     setStage("AI extracting", "busy");
     setProgress(80);
 
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendAnalysisMessage({
       type: "analyze-page",
       pageData: researchPayload
-    });
+    }, "business");
 
     if (!response?.ok) {
       throw new Error(response?.error || "Unknown analysis error.");
     }
+    throwIfStopped();
     logDebug("Business analysis done", { modelUsed: response?.result?.modelUsed, services: response?.result?.services?.length || 0 });
 
     const result = {
@@ -1440,9 +1396,10 @@ async function analyzeCurrentTab() {
     logDebug("analyzeCurrentTab skipped: analysis already running");
     return;
   }
-  setBusy(true);
+  beginAnalysisRun();
   renderResult(null);
   try {
+    throwIfStopped();
     setStage("Loading", "busy");
     await saveSettings();
     setProgress(10);
@@ -1461,10 +1418,15 @@ async function analyzeCurrentTab() {
     await analyzeTab(targetTab.id, targetTab.url);
   } catch (error) {
     setProgress(0);
-    setStage("Error", "error");
-    setStatus(friendlyErrorMessage(error), true);
+    if (isStoppedError(error)) {
+      setStage("Idle", "idle");
+      setStatus("Analysis stopped.");
+    } else {
+      setStage("Error", "error");
+      setStatus(friendlyErrorMessage(error), true);
+    }
   } finally {
-    setBusy(false);
+    endAnalysisRun();
   }
 }
 
@@ -1473,7 +1435,7 @@ async function analyzeTargetUrl() {
     logDebug("analyzeTargetUrl skipped: analysis already running");
     return;
   }
-  setBusy(true);
+  beginAnalysisRun();
   renderResult(null);
   let openedTabId = null;
   try {
@@ -1486,7 +1448,9 @@ async function analyzeTargetUrl() {
     setStatus("Opening website...");
     const tab = await chrome.tabs.create({ url, active: false });
     openedTabId = tab.id;
-    await waitForTabComplete(tab.id);
+    openedTempTabIds.add(tab.id);
+    await waitForTabComplete(tab.id, currentRunController?.signal);
+    openedTempTabIds.delete(tab.id);
     await analyzeTab(tab.id, url);
     if (openedTabId) {
       await chrome.tabs.remove(openedTabId).catch(() => { });
@@ -1494,13 +1458,19 @@ async function analyzeTargetUrl() {
     }
   } catch (error) {
     setProgress(0);
-    setStage("Error", "error");
-    setStatus(friendlyErrorMessage(error), true);
+    if (isStoppedError(error)) {
+      setStage("Idle", "idle");
+      setStatus("Analysis stopped.");
+    } else {
+      setStage("Error", "error");
+      setStatus(friendlyErrorMessage(error), true);
+    }
   } finally {
     if (openedTabId) {
+      openedTempTabIds.delete(openedTabId);
       await chrome.tabs.remove(openedTabId).catch(() => { });
     }
-    setBusy(false);
+    endAnalysisRun();
   }
 }
 
@@ -1515,51 +1485,31 @@ async function analyzeEmployeeDetailsForUrl(url) {
   employeeAnalysisInFlight = true;
   employeeAnalysisInFlightRoot = toRootKey(url);
 
-  setBusy(true);
+  beginAnalysisRun();
   setStage("Initializing", "busy");
   setProgress(10);
   setStatus("Preparing employee analysis...");
   elements.result.classList.add("hidden");
 
   try {
+    throwIfStopped();
     await saveSettings();
-    const homepage = await fetchPageInBackground(url);
+    const homepage = await fetchPageInBackground(url, { signal: currentRunController?.signal });
     if (!homepage) throw new Error("Could not load the target website.");
 
     setProgress(30);
     setStage("Crawling", "busy");
     setStatus("Finding team and employee pages...");
 
-    const seedUrls = [homepage.url];
-
-    // --- ADAPTIVE CRAWL HEURISTICS ---
-    const homepageLinks = homepage.links || [];
-    const directTeamLinks = homepageLinks.filter(l => {
-      const text = String(l.text || "").toLowerCase();
-      const href = String(l.href || l.url || "").toLowerCase();
-      return TEAM_PAGE_KEYWORD_REGEX.test(text) || TEAM_PAGE_KEYWORD_REGEX.test(href);
-    });
-
-    let dynamicDepth;
-    let dynamicMaxPages;
-
-    if (homepageLinks.length <= 5) {
-      dynamicDepth = 1;
-      dynamicMaxPages = Math.max(1, homepageLinks.length);
-      setStatus(`Micro-site detected. Starting fast shallow scan...`);
-    } else if (directTeamLinks.length > 0) {
-      dynamicDepth = 2;
-      dynamicMaxPages = Math.min(15, directTeamLinks.length + 3);
-      setStatus(`Found direct team links. Starting targeted crawl...`);
-    } else if (homepageLinks.length > 80) {
-      dynamicDepth = 3;
-      dynamicMaxPages = 15;
-      setStatus(`Large site structure detected. Starting deep crawl...`);
-    } else {
-      dynamicDepth = 2;
-      dynamicMaxPages = 10;
-      setStatus(`Standard site detected. Starting adaptive crawl...`);
-    }
+    const {
+      homepageLinks,
+      directTeamLinks,
+      seedUrls,
+      dynamicDepth,
+      dynamicMaxPages,
+      status: discoveryStatus
+    } = buildTeamDiscoveryPlan(homepage, { maxCrawlPages: MAX_CRAWL_PAGES });
+    setStatus(discoveryStatus);
 
     logDebug("Dynamic Crawl Limits Calculated", {
       totalLinks: homepageLinks.length,
@@ -1567,65 +1517,203 @@ async function analyzeEmployeeDetailsForUrl(url) {
       dynamicDepth,
       dynamicMaxPages
     });
+    const analysisPromises = [];
+    const discoveredPages = [];
+    const chunkResults = [];
+    const chunkWarnings = [];
+    const chunkEvidence = new Set();
+    let pendingQueue = [];
+    let activeWorkers = 0;
+    let scheduledChunks = 0;
+    let completedChunks = 0;
+    const MAX_CHUNK_CONCURRENCY = 2;
 
-    // --- SMART BFS CRAWL ---
-    const crawledPages = await crawlSiteFromHomepage(homepage, {
+    const recomputeAndPersistProgress = async (isFinal = false) => {
+      const crawledPeople = normalizePeople(dedupePeople([homepage, ...discoveredPages].flatMap((p) => p.people || [])));
+      const aiPeople = normalizePeople(dedupePeople(chunkResults.flatMap((item) => item.people || [])));
+      const mergedPeople = normalizePeople(dedupePeople([...aiPeople, ...crawledPeople]));
+      const leadership = normalizePeople(dedupePeople(chunkResults.flatMap((item) => item.companyLeadership || [])));
+      const teamSummary = buildConciseTeamSummary(chunkResults, mergedPeople);
+      const warnings = [...new Set([...(latestResult?.warnings || []), ...chunkWarnings])];
+      const coverageScore = calculateCoverageScoreForPeople(
+        crawledPeople,
+        { bodyText: [homepage.bodyText || "", ...discoveredPages.map((p) => p.bodyText || "")].join(" ") }
+      );
+
+      await updatePartialResult({
+        analyzedAt: new Date().toISOString(),
+        title: homepage.title || latestResult?.title || "",
+        url: homepage.url || latestResult?.url || "",
+        people: mergedPeople,
+        companyLeadership: leadership,
+        teamSummary,
+        employeeChunks: chunkResults.map((item, index) => ({
+          index: item.index || index + 1,
+          total: item.total || Math.max(1, scheduledChunks),
+          pages: item.pages || [],
+          people: item.people || [],
+          companyLeadership: item.companyLeadership || [],
+          warnings: item.warnings || [],
+          teamSummary: item.teamSummary || "",
+          providerUsed: item.providerUsed || "",
+          modelUsed: item.modelUsed || "",
+          promptTierUsed: item.promptTierUsed || "",
+          error: item.error || ""
+        })),
+        warnings,
+        evidence: [...new Set([...(latestResult?.evidence || []), ...chunkEvidence])],
+        coverage: {
+          pagesCrawled: discoveredPages.length + 1,
+          employeesFound: mergedPeople.length,
+          score: coverageScore.total
+        },
+        employeeAnalysisComplete: isFinal
+      }, { persist: true });
+    };
+
+    const processChunkQueue = async () => {
+      if (isStopRequested()) return;
+      if (activeWorkers >= MAX_CHUNK_CONCURRENCY || pendingQueue.length === 0) return;
+      const task = pendingQueue.shift();
+      if (!task) return;
+      activeWorkers += 1;
+
+      const run = (async () => {
+        throwIfStopped();
+        const page = task.page;
+        const chunkMeta = {
+          index: task.index,
+          total: Math.max(task.index, dynamicMaxPages),
+          pages: [{ title: page.title || "", url: page.url || "" }]
+        };
+        const payload = {
+          ...homepage,
+          discoveredPages: [page]
+        };
+
+        const response = await sendAnalysisMessage({
+          type: "analyze-employee-page-chunk",
+          pageData: compactResearchPayload(payload, {
+            isEmployee: true,
+            maxPages: 3,
+            employeeBodyChars: MAX_EMPLOYEE_PAGE_BODY_CHARS,
+            summaryBodyChars: MAX_SUMMARY_BODY_CHARS,
+            cleanBodyText: true
+          }),
+          chunkMeta
+        }, "employee-chunk");
+
+        if (!response?.ok) {
+          throw new Error(response?.error || `Chunk ${task.index} failed`);
+        }
+
+        const result = response.result || {};
+        chunkResults.push({
+          index: task.index,
+          total: Math.max(task.index, dynamicMaxPages),
+          pages: [{ title: page.title || "", url: page.url || "" }],
+          people: normalizePeople(result.people || []),
+          companyLeadership: normalizePeople(result.companyLeadership || []),
+          warnings: result.warnings || [],
+          teamSummary: result.teamSummary || "",
+          providerUsed: result.providerUsed || "",
+          modelUsed: result.modelUsed || "",
+          promptTierUsed: result.promptTierUsed || ""
+        });
+        for (const warning of (result.warnings || [])) chunkWarnings.push(warning);
+        for (const item of (result.evidence || [])) chunkEvidence.add(item);
+      })()
+        .catch((error) => {
+          if (isStoppedError(error)) return;
+          chunkWarnings.push(`Chunk ${task.index} failed: ${error.message || error}`);
+          chunkResults.push({
+            index: task.index,
+            total: Math.max(task.index, dynamicMaxPages),
+            pages: [{ title: task.page?.title || "", url: task.page?.url || "" }],
+            people: [],
+            companyLeadership: [],
+            warnings: [`Chunk ${task.index} failed: ${error.message || error}`],
+            teamSummary: "",
+            providerUsed: "",
+            modelUsed: "",
+            promptTierUsed: "",
+            error: error.message || String(error)
+          });
+        })
+        .finally(async () => {
+          if (isStopRequested()) return;
+          completedChunks += 1;
+          activeWorkers -= 1;
+          const crawlProgress = Math.min(65, 20 + Math.round((discoveredPages.length / Math.max(1, dynamicMaxPages)) * 45));
+          const aiProgress = Math.min(30, Math.round((completedChunks / Math.max(1, scheduledChunks || 1)) * 30));
+          setProgress(Math.min(95, crawlProgress + aiProgress));
+          setStage("Analyzing", "busy");
+          const crawledCount = discoveredPages.length + 1; // include homepage
+          setStatus(`Streaming employee extraction: crawled ${crawledCount} page(s), analyzed ${completedChunks}/${Math.max(1, scheduledChunks)} queued page(s)...`);
+          await recomputeAndPersistProgress(false);
+          while (activeWorkers < MAX_CHUNK_CONCURRENCY && pendingQueue.length > 0) {
+            await processChunkQueue();
+          }
+        });
+
+      analysisPromises.push(run);
+    };
+
+    const enqueueChunk = async (page) => {
+      throwIfStopped();
+      scheduledChunks += 1;
+      pendingQueue.push({ page, index: scheduledChunks });
+      while (activeWorkers < MAX_CHUNK_CONCURRENCY && pendingQueue.length > 0) {
+        await processChunkQueue();
+      }
+    };
+
+    // Analyze homepage immediately so user sees first results quickly.
+    await enqueueChunk(homepage);
+
+    // --- SMART BFS CRAWL + streaming chunk analysis ---
+    await crawlSiteFromHomepage(homepage, {
       focus: "employee",
       maxDepth: dynamicDepth,
       maxPages: dynamicMaxPages,
       seedUrls,
       includeHomepage: false,
       expandFromDiscovered: true,
-      onProgress: ({ visited, depth, queued }) => {
+      onProgress: ({ visited, depth }) => {
         setStage("Crawling", "busy");
-        setStatus(`Crawling depth ${depth} (${visited}/${dynamicMaxPages} max pages)...`);
+        setStatus(`Crawling depth ${depth} (${visited}/${dynamicMaxPages} max pages) while extracting...`);
+      },
+      onPage: async (page) => {
+        if (!page) return;
+
+        console.log("CRAWLED PAGE:", page.url);
+        console.log("PAGE PEOPLE:", page.people);
+        console.log("EXTRACTION STATS:", page.extractionStats);
+
+        discoveredPages.push(page);
+        await enqueueChunk(page);
       }
     });
 
-    const validPages = crawledPages.filter(Boolean).slice(0, dynamicMaxPages);
-    logDebug("Employee crawled pages", { count: validPages.length, root: homepage.url });
-
-    setProgress(70);
-    setStage("Analyzing", "busy");
-    setStatus("Extracting employee details with AI...");
-
-    const pageData = {
-      ...homepage,
-      discoveredPages: validPages
-    };
-
-    const response = await chrome.runtime.sendMessage({
-      type: "analyze-employee-details",
-      pageData: compactResearchPayload(pageData, true)
-    });
-
-    if (!response?.ok) {
-      throw new Error(response?.error || "Unknown employee analysis error.");
-    }
-
-    const result = {
-      ...(latestResult || {}),
-      ...(response.result || {}),
-      people: normalizePeople((response.result?.people?.length ? response.result.people : pageData.people) || []),
-      teamSummary: response.result?.teamSummary || latestResult?.teamSummary || "",
-      companyLeadership: response.result?.companyLeadership || latestResult?.companyLeadership || [],
-      warnings: response.result?.warnings || latestResult?.warnings || [],
-      employeeAnalysisComplete: true,
-      evidence: [...new Set([...(latestResult?.evidence || []), ...(response.result?.evidence || [])])]
-    };
-
-    renderResult(result);
-    await chrome.storage.local.set({ [LATEST_RESULT_KEY]: result });
+    await Promise.all(analysisPromises);
+    throwIfStopped();
+    await recomputeAndPersistProgress(true);
 
     setStatus("Employee analysis complete.");
     setStage("Complete", "success");
     setProgress(100);
 
   } catch (error) {
-    setStatus(error.message || "Employee analysis failed.", true);
-    setStage("Error", "error");
+    if (isStoppedError(error)) {
+      setStatus("Analysis stopped.");
+      setStage("Idle", "idle");
+      setProgress(0);
+    } else {
+      setStatus(error.message || "Employee analysis failed.", true);
+      setStage("Error", "error");
+    }
   } finally {
-    setBusy(false);
+    endAnalysisRun();
 
     // UNLOCK THE PIPELINE
     employeeAnalysisInFlight = false;
@@ -1652,6 +1740,9 @@ elements.analyzeEmployees.addEventListener("click", () => {
   analyzeEmployeeDetailsForUrl(latestResult.url).catch((error) => {
     setStatus(error.message || "Employee analysis failed.", true);
   });
+});
+elements.stopAnalysis?.addEventListener("click", () => {
+  stopCurrentAnalysis().catch((error) => setStatus(error.message || "Stop failed.", true));
 });
 elements.copyJson.addEventListener("click", () => {
   copyJson().catch((error) => setStatus(error.message || "Copy failed.", true));

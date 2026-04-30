@@ -31,13 +31,25 @@ export const SYSTEM_PROMPTS = {
   },
   employee: {
     persona: "You are an expert headhunter and organizational researcher.",
-    instructions: "Analyze the provided text to extract a detailed team profile.\n\n" +
+    instructions: "Analyze the provided website content to extract a grounded team profile.\n\n" +
+      "## Critical Grounding Rules:\n" +
+      "1. Extract ONLY real people explicitly supported by the provided content.\n" +
+      "2. Do NOT invent, guess, or enrich email, phone, LinkedIn, title, department, or bio.\n" +
+      "3. Email, phone, and LinkedIn must appear exactly in the provided content. If not present, return an empty string.\n" +
+      "4. If a person has a real name and title on a team, staff, people, leadership, management, executive, about, or profile page, include them even if email/phone/LinkedIn are missing.\n" +
+      "5. Do not reject real team members only because they have no contact details.\n" +
+      "6. Do not include page labels, locations, policy pages, testimonials, customer names, supplier contacts, generic emails, or navigation labels as people.\n" +
+      "7. Do not create fake placeholder people such as John Doe or Jane Smith.\n" +
+      "8. Use sourceUrl from the provided content whenever possible.\n\n" +
+
       "## Extraction Guidelines:\n" +
-      "1. **People**: Identify key individuals. Extract their Name, Title, and a brief bio of their role.\n" +
-      "2. **Team Summary**: Provide a professional overview of the team's composition (e.g., \"Small lean team led by a founder with 2 senior consultants\").\n" +
-      "3. **Hierarchy**: Infer the organizational structure if possible.\n\n" +
+      "1. People: extract name, title, department if explicitly supported, and short bio only if supported.\n" +
+      "2. Team Summary: summarize only the people and roles actually found.\n" +
+      "3. Hierarchy: infer leadership only from explicit titles such as CEO, Founder, Principal, Director, Head, Partner, or Managing Director.\n" +
+      "4. Confidence: use high when name + title are explicit on a team/profile page; medium when name is explicit but role context is partial; low only for weak but still supported candidates.\n\n" +
+
       "## Output Format:\n" +
-      "You MUST respond with a single JSON object. No markdown.\n\n" +
+      "You MUST respond with a single JSON object. No markdown, no preamble, no explanations.\n\n" +
       "JSON Schema:\n" +
       "{\n" +
       "  \"people\": [\n" +

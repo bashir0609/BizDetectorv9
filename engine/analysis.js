@@ -79,28 +79,39 @@ function rankOllamaCloudModels(models) {
   return [...preferred, ...remaining];
 }
 
-export async function fetchModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType = "business") {
+export async function fetchModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType = "business", signal = null) {
   if (settings.provider === "gemini") {
-    return fetchGeminiModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType);
+    return fetchGeminiModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType, signal);
   }
   if (settings.provider === "groq") {
-    return fetchGroqModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType);
+    return fetchGroqModelResponse(settings, promptText, model, maxTokens, useJsonMode, apiKey, analysisType, signal);
   }
   if (settings.provider === "ollama" || settings.provider === "jan") {
-    return fetchLocalModelResponse(settings, promptText, model, maxTokens, analysisType);
+    return fetchLocalModelResponse(settings, promptText, model, maxTokens, analysisType, signal);
   }
   // Local providers aren't handled via this generic fetchModelResponse usually, 
   // but we can add them if needed. For now, we follow the existing structure.
   throw new Error(`Unsupported provider: ${settings.provider}`);
 }
 
-export async function requestModel(settings, promptText, model, maxTokens = 1200, apiKey, analysisType = "business") {
+function isJsonModeGenerationFailure(error) {
+  const text = `${error?.message || ""} ${error?.responseText || ""}`;
+  return /json_validate_failed|failed to generate json|failed_generation|max completion tokens reached before generating a valid document/i.test(text);
+}
+
+export async function requestModel(settings, promptText, model, maxTokens = 1200, apiKey, analysisType = "business", signal = null) {
   let payload;
+  let jsonModeUsed = true;
   try {
-    payload = await fetchModelResponse(settings, promptText, model, maxTokens, true, apiKey, analysisType);
+    payload = await fetchModelResponse(settings, promptText, model, maxTokens, true, apiKey, analysisType, signal);
   } catch (error) {
-    // In a real app, we'd check if it's a JSON validation error and retry without JSON mode
-    throw error;
+    if (!isJsonModeGenerationFailure(error)) {
+      throw error;
+    }
+
+    jsonModeUsed = false;
+    const retryTokens = Math.min(Math.max(maxTokens + 800, Math.ceil(maxTokens * 1.5)), 4096);
+    payload = await fetchModelResponse(settings, promptText, model, retryTokens, false, apiKey, analysisType, signal);
   }
 
   const content = settings.provider === "gemini"
@@ -114,6 +125,7 @@ export async function requestModel(settings, promptText, model, maxTokens = 1200
   return {
     content,
     modelUsed: model,
+    jsonModeUsed,
     rawResponse: payload
   };
 }
