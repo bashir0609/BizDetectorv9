@@ -283,6 +283,10 @@ function buildBusinessPrompt(pageData = {}) {
     metadata: pageData.metadata || {},
     structuredData: pageData.structuredData || {},
     bodyText: truncateText(pageData.bodyText, 12000),
+    extractedEmails: pageData.extractedEmails || [],
+    extractedPhones: pageData.extractedPhones || [],
+    people: (pageData.people || []).slice(0, 20),
+    discoveredProfileLinks: (pageData.discoveredProfileLinks || []).slice(0, 50),
     discoveredPages: (pageData.discoveredPages || []).slice(0, 4).map((page) => ({
       title: page.title || "",
       url: page.url || "",
@@ -291,7 +295,21 @@ function buildBusinessPrompt(pageData = {}) {
     }))
   };
 
-  return `Analyze this website research payload and return only the requested business JSON schema.\n\nRequired fields include businessType, industry, services, confidence, summary, evidence, and websiteSignals.\nwebsiteSignals must be a single concise string describing observable signals from the website, or an empty string if none are visible.\nServices must be clear customer-facing service names, not one-word navigation labels when a clearer name is possible.\n\nResearch payload:\n${JSON.stringify(payload, null, 2)}`;
+  return `Analyze this website research payload and return only the requested business JSON schema.
+
+Required fields include businessType, industry, services, confidence, summary, evidence, and websiteSignals.
+websiteSignals must be a single concise string describing observable signals from the website (emails, phones, team members, profile links, services mentioned), or an empty string if none are visible.
+Services must be clear customer-facing service names, not one-word navigation labels when a clearer name is possible.
+
+Key signals to consider for websiteSignals:
+- Extracted emails: ${payload.extractedEmails?.length || 0} found
+- Extracted phones: ${payload.extractedPhones?.length || 0} found
+- People/team members: ${payload.people?.length || 0} found
+- Profile links discovered: ${payload.discoveredProfileLinks?.length || 0} found
+- Services/evidence from body text and structured data
+
+Research payload:
+${JSON.stringify(payload, null, 2)}`;
 }
 
 function buildEmployeeChunks(pageData = {}, pagesPerChunk = 2) {
